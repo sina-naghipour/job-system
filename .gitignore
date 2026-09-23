@@ -21,3 +21,9 @@ $RECYCLE.BIN/
 .vscode/
 .idea/
 .DS_Store
+
+# Coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
