@@ -1,0 +1,143 @@
+import asyncio
+import json
+import logging
+from typing import Optional
+
+import websockets
+from websockets.server import WebSocketServerProtocol
+
+from packages.shared.protocol import (
+    AgentToServer,
+    JobMessage,
+    JobState,
+)
+from packages.server.store import AgentRegistry, JobService
+
+log = logging.getLogger(__name__)
+
+
+class AgentGateway:
+    """WebSocket server that accepts outbound connections from Agents."""
+
+    def __init__(
+        self,
+        job_service: JobService,
+        agent_registry: AgentRegistry,
+        host: str = "0.0.0.0",
+        port: int = 8080,
+    ) -> None:
+        self._job_service = job_service
+        self._agents = agent_registry
+        self._host = host
+        self._port = port
+
+    async def serve(self) -> None:
+        async with websockets.serve(self._handle_connection, self._host, self._port):
+            log.info("Agent gateway listening on ws://%s:%s", self._host, self._port)
+            await asyncio.Future()
+
+    async def _handle_connection(self, ws: WebSocketServerProtocol) -> None:
+        agent_id: Optional[str] = None
+        try:
+            async for raw in ws:
+                message: AgentToServer = json.loads(raw)
+                agent_id = await self._dispatch(ws, message, agent_id)
+        except websockets.ConnectionClosed:
+            log.info("Agent disconnected: %s", agent_id)
+        finally:
+            if agent_id:
+                self._agents.unregister(agent_id)
+
+    async def _dispatch(
+        self,
+        ws: WebSocketServerProtocol,
+        message: AgentToServer,
+        agent_id: Optional[str],
+    ) -> Optional[str]:
+        handlers = {
+            "register": self._on_register,
+            "ack": self._on_ack,
+            "started": self._on_started,
+            "log": self._on_log,
+            "result": self._on_result,
+            "heartbeat": self._on_heartbeat,
+        }
+        handler = handlers.get(message["type"])
+        if handler is None:
+            log.warning("Unknown message type: %s", message["type"])
+            return agent_id
+        return await handler(ws, message, agent_id)
+
+    async def _on_register(
+        self,
+        ws: WebSocketServerProtocol,
+        message: dict,
+        agent_id: Optional[str],
+    ) -> str:
+        new_agent_id = message["agent_id"]
+        self._agents.register(new_agent_id, ws)
+        log.info("Agent registered: %s", new_agent_id)
+        await self.dispatch_pending(new_agent_id)
+        return new_agent_id
+
+    async def _on_ack(self, ws, message: dict, agent_id: Optional[str]) -> Optional[str]:
+        log.debug("Ack for %s", message["job_id"])
+        return agent_id
+
+    async def _on_started(self, ws, message: dict, agent_id: Optional[str]) -> Optional[str]:
+        job = self._job_service.mark_running(message["job_id"])
+        if job:
+            log.info("Job %s is RUNNING", job.job_id)
+        return agent_id
+
+    async def _on_log(self, ws, message: dict, agent_id: Optional[str]) -> Optional[str]:
+        # Live log streaming arrives in Phase 2.
+        log.debug("Log chunk for %s", message["job_id"])
+        return agent_id
+
+    async def _on_result(self, ws, message: dict, agent_id: Optional[str]) -> Optional[str]:
+        job_id = message["job_id"]
+        exit_code = message["exit_code"]
+        stdout = message.get("stdout", "")
+        stderr = message.get("stderr", "")
+        error = message.get("error")
+
+        if error:
+            job = self._job_service.mark_failed(job_id, exit_code, stdout, stderr, error)
+        elif exit_code == 0:
+            job = self._job_service.mark_succeeded(job_id, exit_code, stdout, stderr)
+        else:
+            job = self._job_service.mark_failed(job_id, exit_code, stdout, stderr)
+
+        if job:
+            log.info("Job %s finished: state=%s exit_code=%s", job.job_id, job.state.value, job.exit_code)
+        return agent_id
+
+    async def _on_heartbeat(self, ws, message: dict, agent_id: Optional[str]) -> Optional[str]:
+        # Heartbeat tracking arrives in Phase 2.
+        return agent_id
+
+    async def dispatch_pending(self, agent_id: str) -> None:
+        """Send any PENDING jobs for this agent, oldest first."""
+        conn = self._agents.get(agent_id)
+        if conn is None:
+            return
+
+        pending = self._job_service.list(agent_id=agent_id, state=JobState.PENDING)
+        pending = sorted(pending, key=lambda j: j.created_at)
+
+        for job in pending:
+            message: JobMessage = {
+                "type": "job",
+                "job_id": job.job_id,
+                "image": job.image,
+                "command": job.command,
+                "timeout_ms": job.timeout_ms,
+            }
+            try:
+                await conn.ws.send(json.dumps(message))
+            except websockets.ConnectionClosed:
+                log.warning("Failed to dispatch %s: agent %s disconnected", job.job_id, agent_id)
+                return
+            self._job_service.mark_dispatched(job.job_id)
+            log.info("Dispatched %s to %s", job.job_id, agent_id)
