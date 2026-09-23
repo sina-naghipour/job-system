@@ -31,6 +31,11 @@ def setup() -> tuple[JobService, AgentGateway, AgentRegistry]:
     return service, gateway, registry
 
 
+def _advance_to_running(service: JobService, job_id: str) -> None:
+    service.mark_dispatched(job_id)
+    service.mark_running(job_id)
+
+
 async def test_register(setup) -> None:
     _, gateway, registry = setup
     await gateway._dispatch(FakeWebSocket(), {"type": "register", "agent_id": "a1"}, None)
@@ -56,9 +61,10 @@ async def test_ack_no_op(setup) -> None:
     assert service.get(job.job_id).state == JobState.PENDING
 
 
-async def test_started(setup) -> None:
+async def test_started_marks_running(setup) -> None:
     service, gateway, _ = setup
     job = service.submit("a1", "alpine", ["echo"], 1000)
+    service.mark_dispatched(job.job_id)
     await gateway._dispatch(
         FakeWebSocket(), {"type": "started", "job_id": job.job_id}, "a1"
     )
@@ -68,6 +74,7 @@ async def test_started(setup) -> None:
 async def test_result_success(setup) -> None:
     service, gateway, _ = setup
     job = service.submit("a1", "alpine", ["echo"], 1000)
+    _advance_to_running(service, job.job_id)
     await gateway._dispatch(FakeWebSocket(), {
         "type": "result", "job_id": job.job_id,
         "exit_code": 0, "stdout": "hi", "stderr": "", "error": None,
@@ -80,6 +87,7 @@ async def test_result_success(setup) -> None:
 async def test_result_failure(setup) -> None:
     service, gateway, _ = setup
     job = service.submit("a1", "alpine", ["false"], 1000)
+    _advance_to_running(service, job.job_id)
     await gateway._dispatch(FakeWebSocket(), {
         "type": "result", "job_id": job.job_id,
         "exit_code": 42, "stdout": "", "stderr": "boom", "error": None,
@@ -92,6 +100,7 @@ async def test_result_failure(setup) -> None:
 async def test_result_with_infra_error(setup) -> None:
     service, gateway, _ = setup
     job = service.submit("a1", "alpine", ["echo"], 1000)
+    _advance_to_running(service, job.job_id)
     await gateway._dispatch(FakeWebSocket(), {
         "type": "result", "job_id": job.job_id,
         "exit_code": 1, "stdout": "", "stderr": "",

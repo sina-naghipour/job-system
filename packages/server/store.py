@@ -73,8 +73,6 @@ class AgentConnection:
 
 
 class JobRepository(ABC):
-    """Storage contract. Swap the implementation without touching callers."""
-
     @abstractmethod
     def add(self, job: Job) -> Job: ...
 
@@ -94,19 +92,46 @@ class JobRepository(ABC):
     @abstractmethod
     def save(self, job: Job) -> Job: ...
 
+    @abstractmethod
+    def transition_if(
+        self,
+        job_id: str,
+        expected: JobState,
+        new_state: JobState,
+    ) -> Optional[Job]: ...
+
+    @abstractmethod
+    def complete_if_running(
+        self,
+        job_id: str,
+        new_state: JobState,
+        exit_code: int,
+        stdout: str,
+        stderr: str,
+        error: Optional[str],
+    ) -> Optional[Job]: ...
+
 
 class InMemoryJobRepository(JobRepository):
+    """
+    In-memory repository.
+
+    Every method that reads-then-writes does so without yielding, so under
+    asyncio (single thread, cooperative scheduling) they are atomic.
+    No locks needed.
+    """
+
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
         self._idempotency: dict[str, str] = {}
 
     def add(self, job: Job) -> Job:
-        existing = self.get_by_idempotency_key(job.idempotency_key) if job.idempotency_key else None
-        if existing:
-            return existing
-        self._jobs[job.job_id] = job
-        if job.idempotency_key:
+        if job.idempotency_key is not None:
+            existing_id = self._idempotency.get(job.idempotency_key)
+            if existing_id is not None:
+                return self._jobs[existing_id]
             self._idempotency[job.idempotency_key] = job.job_id
+        self._jobs[job.job_id] = job
         return job
 
     def get(self, job_id: str) -> Optional[Job]:
@@ -133,10 +158,50 @@ class InMemoryJobRepository(JobRepository):
         self._jobs[job.job_id] = job
         return job
 
+    def transition_if(
+        self,
+        job_id: str,
+        expected: JobState,
+        new_state: JobState,
+    ) -> Optional[Job]:
+        job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        if job.state != expected:
+            return job
+        job.state = new_state
+        job.updated_at = now()
+        if new_state == JobState.RUNNING and job.started_at is None:
+            job.started_at = job.updated_at
+        if new_state.is_terminal:
+            job.finished_at = job.updated_at
+        return job
+
+    def complete_if_running(
+        self,
+        job_id: str,
+        new_state: JobState,
+        exit_code: int,
+        stdout: str,
+        stderr: str,
+        error: Optional[str],
+    ) -> Optional[Job]:
+        job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        if job.state != JobState.RUNNING:
+            return job
+        job.exit_code = exit_code
+        job.stdout = stdout
+        job.stderr = stderr
+        job.error = error
+        job.state = new_state
+        job.updated_at = now()
+        job.finished_at = job.updated_at
+        return job
+
 
 class JobService:
-    """Business rules for Job state transitions. Knows nothing about storage."""
-
     def __init__(self, repository: JobRepository) -> None:
         self._repository = repository
 
@@ -171,13 +236,21 @@ class JobService:
         return self._repository.list(agent_id=agent_id, state=state)
 
     def mark_dispatched(self, job_id: str) -> Optional[Job]:
-        return self._transition(job_id, JobState.DISPATCHED)
+        return self._repository.transition_if(
+            job_id, JobState.PENDING, JobState.DISPATCHED
+        )
 
     def mark_running(self, job_id: str) -> Optional[Job]:
-        return self._transition(job_id, JobState.RUNNING)
+        return self._repository.transition_if(
+            job_id, JobState.DISPATCHED, JobState.RUNNING
+        )
 
-    def mark_succeeded(self, job_id: str, exit_code: int, stdout: str, stderr: str) -> Optional[Job]:
-        return self._complete(job_id, JobState.SUCCEEDED, exit_code, stdout, stderr, error=None)
+    def mark_succeeded(
+        self, job_id: str, exit_code: int, stdout: str, stderr: str
+    ) -> Optional[Job]:
+        return self._repository.complete_if_running(
+            job_id, JobState.SUCCEEDED, exit_code, stdout, stderr, error=None
+        )
 
     def mark_failed(
         self,
@@ -187,52 +260,30 @@ class JobService:
         stderr: str,
         error: Optional[str] = None,
     ) -> Optional[Job]:
-        return self._complete(job_id, JobState.FAILED, exit_code, stdout, stderr, error)
+        return self._repository.complete_if_running(
+            job_id, JobState.FAILED, exit_code, stdout, stderr, error
+        )
 
     def mark_timed_out(self, job_id: str) -> Optional[Job]:
-        return self._transition(job_id, JobState.TIMED_OUT)
+        return self._repository.transition_if(
+            job_id, JobState.RUNNING, JobState.TIMED_OUT
+        )
 
     def mark_cancelled(self, job_id: str) -> Optional[Job]:
-        return self._transition(job_id, JobState.CANCELLED)
+        job = self._repository.get(job_id)
+        if job is None or job.state.is_terminal:
+            return job
+        return self._repository.transition_if(
+            job_id, job.state, JobState.CANCELLED
+        )
 
     def requeue(self, job_id: str) -> Optional[Job]:
-        return self._transition(job_id, JobState.PENDING)
-
-    def _transition(self, job_id: str, new_state: JobState) -> Optional[Job]:
-        job = self._repository.get(job_id)
-        if job is None or job.state.is_terminal:
-            return job
-        job.state = new_state
-        if new_state == JobState.RUNNING and job.started_at is None:
-            job.started_at = now()
-        if new_state.is_terminal:
-            job.finished_at = now()
-        return self._repository.save(job)
-
-    def _complete(
-        self,
-        job_id: str,
-        state: JobState,
-        exit_code: int,
-        stdout: str,
-        stderr: str,
-        error: Optional[str],
-    ) -> Optional[Job]:
-        job = self._repository.get(job_id)
-        if job is None or job.state.is_terminal:
-            return job
-        job.exit_code = exit_code
-        job.stdout = stdout
-        job.stderr = stderr
-        job.error = error
-        job.state = state
-        job.finished_at = now()
-        return self._repository.save(job)
+        return self._repository.transition_if(
+            job_id, JobState.DISPATCHED, JobState.PENDING
+        )
 
 
 class AgentRegistry:
-    """Tracks connected Agents. Separate concern from Job storage."""
-
     def __init__(self) -> None:
         self._agents: dict[str, AgentConnection] = {}
 

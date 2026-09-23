@@ -6,8 +6,6 @@ from pydantic import BaseModel, Field
 from packages.server.gateway import AgentGateway
 from packages.server.store import JobService
 
-router = APIRouter()
-
 
 class SubmitJobRequest(BaseModel):
     agentId: str = Field(min_length=1)
@@ -27,6 +25,8 @@ class JobListResponse(BaseModel):
 
 
 def build_router(job_service: JobService, gateway: AgentGateway) -> APIRouter:
+    router = APIRouter()
+
     @router.post("/jobs", response_model=SubmitJobResponse, status_code=202)
     async def submit_job(req: SubmitJobRequest) -> SubmitJobResponse:
         job = job_service.submit(

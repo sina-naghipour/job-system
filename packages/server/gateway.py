@@ -4,13 +4,9 @@ import logging
 from typing import Optional
 
 import websockets
-from websockets.server import WebSocketServerProtocol
+from websockets.asyncio.server import ServerConnection
 
-from packages.shared.protocol import (
-    AgentToServer,
-    JobMessage,
-    JobState,
-)
+from packages.shared.protocol import AgentToServer, JobMessage, JobState
 from packages.server.store import AgentRegistry, JobService
 
 log = logging.getLogger(__name__)
@@ -30,13 +26,21 @@ class AgentGateway:
         self._agents = agent_registry
         self._host = host
         self._port = port
+        self._dispatch_locks: dict[str, asyncio.Lock] = {}
 
     async def serve(self) -> None:
         async with websockets.serve(self._handle_connection, self._host, self._port):
             log.info("Agent gateway listening on ws://%s:%s", self._host, self._port)
             await asyncio.Future()
 
-    async def _handle_connection(self, ws: WebSocketServerProtocol) -> None:
+    def _lock_for(self, agent_id: str) -> asyncio.Lock:
+        lock = self._dispatch_locks.get(agent_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._dispatch_locks[agent_id] = lock
+        return lock
+
+    async def _handle_connection(self, ws: ServerConnection) -> None:
         agent_id: Optional[str] = None
         try:
             async for raw in ws:
@@ -47,10 +51,11 @@ class AgentGateway:
         finally:
             if agent_id:
                 self._agents.unregister(agent_id)
+                self._dispatch_locks.pop(agent_id, None)
 
     async def _dispatch(
         self,
-        ws: WebSocketServerProtocol,
+        ws: ServerConnection,
         message: AgentToServer,
         agent_id: Optional[str],
     ) -> Optional[str]:
@@ -70,7 +75,7 @@ class AgentGateway:
 
     async def _on_register(
         self,
-        ws: WebSocketServerProtocol,
+        ws: ServerConnection,
         message: dict,
         agent_id: Optional[str],
     ) -> str:
@@ -80,22 +85,30 @@ class AgentGateway:
         await self.dispatch_pending(new_agent_id)
         return new_agent_id
 
-    async def _on_ack(self, ws, message: dict, agent_id: Optional[str]) -> Optional[str]:
+    async def _on_ack(
+        self, ws: ServerConnection, message: dict, agent_id: Optional[str]
+    ) -> Optional[str]:
         log.debug("Ack for %s", message["job_id"])
         return agent_id
 
-    async def _on_started(self, ws, message: dict, agent_id: Optional[str]) -> Optional[str]:
+    async def _on_started(
+        self, ws: ServerConnection, message: dict, agent_id: Optional[str]
+    ) -> Optional[str]:
         job = self._job_service.mark_running(message["job_id"])
         if job:
             log.info("Job %s is RUNNING", job.job_id)
         return agent_id
 
-    async def _on_log(self, ws, message: dict, agent_id: Optional[str]) -> Optional[str]:
+    async def _on_log(
+        self, ws: ServerConnection, message: dict, agent_id: Optional[str]
+    ) -> Optional[str]:
         # Live log streaming arrives in Phase 2.
         log.debug("Log chunk for %s", message["job_id"])
         return agent_id
 
-    async def _on_result(self, ws, message: dict, agent_id: Optional[str]) -> Optional[str]:
+    async def _on_result(
+        self, ws: ServerConnection, message: dict, agent_id: Optional[str]
+    ) -> Optional[str]:
         job_id = message["job_id"]
         exit_code = message["exit_code"]
         stdout = message.get("stdout", "")
@@ -110,34 +123,49 @@ class AgentGateway:
             job = self._job_service.mark_failed(job_id, exit_code, stdout, stderr)
 
         if job:
-            log.info("Job %s finished: state=%s exit_code=%s", job.job_id, job.state.value, job.exit_code)
+            log.info(
+                "Job %s finished: state=%s exit_code=%s",
+                job.job_id, job.state.value, job.exit_code,
+            )
         return agent_id
 
-    async def _on_heartbeat(self, ws, message: dict, agent_id: Optional[str]) -> Optional[str]:
+    async def _on_heartbeat(
+        self, ws: ServerConnection, message: dict, agent_id: Optional[str]
+    ) -> Optional[str]:
         # Heartbeat tracking arrives in Phase 2.
         return agent_id
 
     async def dispatch_pending(self, agent_id: str) -> None:
-        """Send any PENDING jobs for this agent, oldest first."""
-        conn = self._agents.get(agent_id)
-        if conn is None:
-            return
+        """
+        Send any PENDING jobs for this agent, oldest first.
 
-        pending = self._job_service.list(agent_id=agent_id, state=JobState.PENDING)
-        pending = sorted(pending, key=lambda j: j.created_at)
-
-        for job in pending:
-            message: JobMessage = {
-                "type": "job",
-                "job_id": job.job_id,
-                "image": job.image,
-                "command": job.command,
-                "timeout_ms": job.timeout_ms,
-            }
-            try:
-                await conn.ws.send(json.dumps(message))
-            except websockets.ConnectionClosed:
-                log.warning("Failed to dispatch %s: agent %s disconnected", job.job_id, agent_id)
+        The per-agent lock ensures that concurrent calls (e.g. an HTTP submit
+        and an agent register arriving at the same time) cannot both observe
+        the same PENDING job and dispatch it twice.
+        """
+        async with self._lock_for(agent_id):
+            conn = self._agents.get(agent_id)
+            if conn is None:
                 return
-            self._job_service.mark_dispatched(job.job_id)
-            log.info("Dispatched %s to %s", job.job_id, agent_id)
+
+            pending = self._job_service.list(agent_id=agent_id, state=JobState.PENDING)
+            pending = sorted(pending, key=lambda j: j.created_at)
+
+            for job in pending:
+                message: JobMessage = {
+                    "type": "job",
+                    "job_id": job.job_id,
+                    "image": job.image,
+                    "command": job.command,
+                    "timeout_ms": job.timeout_ms,
+                }
+                try:
+                    await conn.ws.send(json.dumps(message))
+                except websockets.ConnectionClosed:
+                    log.warning(
+                        "Failed to dispatch %s: agent %s disconnected",
+                        job.job_id, agent_id,
+                    )
+                    return
+                self._job_service.mark_dispatched(job.job_id)
+                log.info("Dispatched %s to %s", job.job_id, agent_id)

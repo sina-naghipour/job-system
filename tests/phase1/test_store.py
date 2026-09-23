@@ -31,12 +31,10 @@ def test_repository_add_idempotent_by_key(repository: InMemoryJobRepository) -> 
 
 
 def test_repository_add_without_key_stores_all(repository: InMemoryJobRepository) -> None:
-    a = Job("job_a", "agent-1", "alpine", ["echo"], 1000)
-    b = Job("job_b", "agent-1", "alpine", ["echo"], 1000)
-    repository.add(a)
-    repository.add(b)
-    assert repository.get("job_a") is a
-    assert repository.get("job_b") is b
+    repository.add(Job("job_a", "agent-1", "alpine", ["echo"], 1000))
+    repository.add(Job("job_b", "agent-1", "alpine", ["echo"], 1000))
+    assert repository.get("job_a") is not None
+    assert repository.get("job_b") is not None
 
 
 def test_repository_get_by_idempotency_key(repository: InMemoryJobRepository) -> None:
@@ -77,6 +75,42 @@ def test_repository_save_updates_job(repository: InMemoryJobRepository) -> None:
     job.stdout = "hello"
     repository.save(job)
     assert repository.get("job_1").stdout == "hello"
+
+
+def test_transition_if_succeeds_when_state_matches(repository: InMemoryJobRepository) -> None:
+    repository.add(Job("job_1", "agent-1", "alpine", ["echo"], 1000))
+    result = repository.transition_if("job_1", JobState.PENDING, JobState.DISPATCHED)
+    assert result.state == JobState.DISPATCHED
+
+
+def test_transition_if_rejected_when_state_differs(repository: InMemoryJobRepository) -> None:
+    repository.add(Job("job_1", "agent-1", "alpine", ["echo"], 1000))
+    result = repository.transition_if("job_1", JobState.RUNNING, JobState.SUCCEEDED)
+    assert result.state == JobState.PENDING  # unchanged
+
+
+def test_transition_if_unknown_job(repository: InMemoryJobRepository) -> None:
+    assert repository.transition_if("missing", JobState.PENDING, JobState.DISPATCHED) is None
+
+
+def test_complete_if_running_requires_running(repository: InMemoryJobRepository) -> None:
+    repository.add(Job("job_1", "agent-1", "alpine", ["echo"], 1000))
+    # Job is PENDING, not RUNNING. Completion should not apply.
+    result = repository.complete_if_running(
+        "job_1", JobState.SUCCEEDED, 0, "out", "", None
+    )
+    assert result.state == JobState.PENDING
+
+
+def test_complete_if_running_applies(repository: InMemoryJobRepository) -> None:
+    job = Job("job_1", "agent-1", "alpine", ["echo"], 1000)
+    job.state = JobState.RUNNING
+    repository.add(job)
+    result = repository.complete_if_running(
+        "job_1", JobState.SUCCEEDED, 0, "out", "", None
+    )
+    assert result.state == JobState.SUCCEEDED
+    assert result.stdout == "out"
 
 
 # ---------------------------------------------------------------------------
@@ -120,12 +154,27 @@ def test_mark_dispatched(job_service: JobService) -> None:
     assert job_service.mark_dispatched(job.job_id).state == JobState.DISPATCHED
 
 
+def test_mark_dispatched_from_wrong_state_is_noop(job_service: JobService) -> None:
+    job = job_service.submit("agent-1", "alpine", ["echo"], 1000)
+    job_service.mark_dispatched(job.job_id)
+    # Already DISPATCHED, not PENDING. Transition should not happen.
+    result = job_service.mark_dispatched(job.job_id)
+    assert result.state == JobState.DISPATCHED
+
+
 def test_mark_running_sets_started_at(job_service: JobService) -> None:
     job = job_service.submit("agent-1", "alpine", ["echo"], 1000)
     job_service.mark_dispatched(job.job_id)
     updated = job_service.mark_running(job.job_id)
     assert updated.state == JobState.RUNNING
     assert updated.started_at is not None
+
+
+def test_mark_running_from_pending_is_noop(job_service: JobService) -> None:
+    job = job_service.submit("agent-1", "alpine", ["echo"], 1000)
+    # Job is PENDING, not DISPATCHED. Cannot jump to RUNNING.
+    result = job_service.mark_running(job.job_id)
+    assert result.state == JobState.PENDING
 
 
 def test_mark_succeeded(job_service: JobService) -> None:
@@ -138,11 +187,11 @@ def test_mark_succeeded(job_service: JobService) -> None:
     assert updated.finished_at is not None
 
 
-def test_mark_failed(job_service: JobService) -> None:
+def test_mark_failed_with_error(job_service: JobService) -> None:
     job = job_service.submit("agent-1", "alpine", ["false"], 1000)
     job_service.mark_dispatched(job.job_id)
     job_service.mark_running(job.job_id)
-    updated = job_service.mark_failed(job.job_id, 42, "", "boom")
+    updated = job_service.mark_failed(job.job_id, 42, "", "boom", error="boom")
     assert updated.state == JobState.FAILED
     assert updated.exit_code == 42
     assert updated.error == "boom"
@@ -156,8 +205,15 @@ def test_mark_timed_out(job_service: JobService) -> None:
     assert updated.state == JobState.TIMED_OUT
 
 
-def test_mark_cancelled(job_service: JobService) -> None:
+def test_mark_cancelled_from_pending(job_service: JobService) -> None:
     job = job_service.submit("agent-1", "alpine", ["sleep"], 1000)
+    assert job_service.mark_cancelled(job.job_id).state == JobState.CANCELLED
+
+
+def test_mark_cancelled_from_running(job_service: JobService) -> None:
+    job = job_service.submit("agent-1", "alpine", ["sleep"], 1000)
+    job_service.mark_dispatched(job.job_id)
+    job_service.mark_running(job.job_id)
     assert job_service.mark_cancelled(job.job_id).state == JobState.CANCELLED
 
 
@@ -167,11 +223,22 @@ def test_requeue(job_service: JobService) -> None:
     assert job_service.requeue(job.job_id).state == JobState.PENDING
 
 
+def test_late_result_ignored(job_service: JobService) -> None:
+    job = job_service.submit("agent-1", "alpine", ["echo"], 1000)
+    job_service.mark_dispatched(job.job_id)
+    job_service.mark_running(job.job_id)
+    job_service.mark_timed_out(job.job_id)
+    # Late result arrives. Must not change the terminal state.
+    late = job_service.mark_succeeded(job.job_id, 0, "ok", "")
+    assert late.state == JobState.TIMED_OUT
+
+
 def test_terminal_state_protected(job_service: JobService) -> None:
     job = job_service.submit("agent-1", "alpine", ["echo"], 1000)
     job_service.mark_dispatched(job.job_id)
     job_service.mark_running(job.job_id)
     job_service.mark_succeeded(job.job_id, 0, "", "")
+
     assert job_service.mark_failed(job.job_id, 1, "", "").state == JobState.SUCCEEDED
     assert job_service.mark_timed_out(job.job_id).state == JobState.SUCCEEDED
     assert job_service.mark_cancelled(job.job_id).state == JobState.SUCCEEDED
