@@ -1,0 +1,155 @@
+import json
+
+import pytest
+
+from packages.shared.protocol import JobState
+from packages.server.gateway import AgentGateway
+from packages.server.store import (
+    AgentRegistry,
+    InMemoryJobRepository,
+    JobService,
+)
+
+
+class FakeWebSocket:
+    def __init__(self, fail_on_send: bool = False) -> None:
+        self.sent: list[dict] = []
+        self._fail = fail_on_send
+
+    async def send(self, raw: str) -> None:
+        if self._fail:
+            import websockets
+            raise websockets.ConnectionClosed(None, None)
+        self.sent.append(json.loads(raw))
+
+
+@pytest.fixture
+def setup() -> tuple[JobService, AgentGateway, AgentRegistry]:
+    service = JobService(InMemoryJobRepository())
+    registry = AgentRegistry()
+    gateway = AgentGateway(service, registry, host="127.0.0.1", port=0)
+    return service, gateway, registry
+
+
+def _advance_to_running(service: JobService, job_id: str) -> None:
+    service.mark_dispatched(job_id)
+    service.mark_running(job_id)
+
+
+async def test_register(setup) -> None:
+    _, gateway, registry = setup
+    await gateway._dispatch(FakeWebSocket(), {"type": "register", "agent_id": "a1"}, None)
+    assert registry.is_online("a1")
+
+
+async def test_register_dispatches_pending(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+    ws = FakeWebSocket()
+    await gateway._dispatch(ws, {"type": "register", "agent_id": "a1"}, None)
+    assert ws.sent[0]["job_id"] == job.job_id
+    assert service.get(job.job_id).state == JobState.DISPATCHED
+
+
+async def test_ack_no_op(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+    result = await gateway._dispatch(
+        FakeWebSocket(), {"type": "ack", "job_id": job.job_id}, "a1"
+    )
+    assert result == "a1"
+    assert service.get(job.job_id).state == JobState.PENDING
+
+
+async def test_started_marks_running(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+    service.mark_dispatched(job.job_id)
+    await gateway._dispatch(
+        FakeWebSocket(), {"type": "started", "job_id": job.job_id}, "a1"
+    )
+    assert service.get(job.job_id).state == JobState.RUNNING
+
+
+async def test_result_success(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+    _advance_to_running(service, job.job_id)
+    await gateway._dispatch(FakeWebSocket(), {
+        "type": "result", "job_id": job.job_id,
+        "exit_code": 0, "stdout": "hi", "stderr": "", "error": None,
+    }, "a1")
+    fetched = service.get(job.job_id)
+    assert fetched.state == JobState.SUCCEEDED
+    assert fetched.stdout == "hi"
+
+
+async def test_result_failure(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["false"], 1000)
+    _advance_to_running(service, job.job_id)
+    await gateway._dispatch(FakeWebSocket(), {
+        "type": "result", "job_id": job.job_id,
+        "exit_code": 42, "stdout": "", "stderr": "boom", "error": None,
+    }, "a1")
+    fetched = service.get(job.job_id)
+    assert fetched.state == JobState.FAILED
+    assert fetched.exit_code == 42
+
+
+async def test_result_with_infra_error(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+    _advance_to_running(service, job.job_id)
+    await gateway._dispatch(FakeWebSocket(), {
+        "type": "result", "job_id": job.job_id,
+        "exit_code": 1, "stdout": "", "stderr": "",
+        "error": "docker daemon unreachable",
+    }, "a1")
+    fetched = service.get(job.job_id)
+    assert fetched.state == JobState.FAILED
+    assert fetched.error == "docker daemon unreachable"
+
+
+async def test_log_ignored(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+    result = await gateway._dispatch(FakeWebSocket(), {
+        "type": "log", "job_id": job.job_id,
+        "stream": "stdout", "sequence": 1, "chunk": "x",
+    }, "a1")
+    assert result == "a1"
+
+
+async def test_heartbeat_ignored(setup) -> None:
+    _, gateway, _ = setup
+    assert await gateway._dispatch(
+        FakeWebSocket(), {"type": "heartbeat", "agent_id": "a1"}, "a1"
+    ) == "a1"
+
+
+async def test_unknown_type_ignored(setup) -> None:
+    _, gateway, _ = setup
+    assert await gateway._dispatch(FakeWebSocket(), {"type": "bogus"}, "a1") == "a1"
+
+
+async def test_dispatch_pending_sends_all(setup) -> None:
+    service, gateway, registry = setup
+    a = service.submit("a1", "alpine", ["echo", "a"], 1000)
+    b = service.submit("a1", "alpine", ["echo", "b"], 1000)
+    ws = FakeWebSocket()
+    registry.register("a1", ws)
+    await gateway.dispatch_pending("a1")
+    assert {m["job_id"] for m in ws.sent} == {a.job_id, b.job_id}
+
+
+async def test_dispatch_pending_no_agent(setup) -> None:
+    _, gateway, _ = setup
+    await gateway.dispatch_pending("missing")
+
+
+async def test_dispatch_pending_send_fails(setup) -> None:
+    service, gateway, registry = setup
+    service.submit("a1", "alpine", ["echo"], 1000)
+    registry.register("a1", FakeWebSocket(fail_on_send=True))
+    await gateway.dispatch_pending("a1")

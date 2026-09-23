@@ -72,7 +72,7 @@ The project is delivered in four phases. Each phase is a milestone, a PR, and a 
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| **Phase 1** | MVP — prove the core | ☐ |
+| **Phase 1** | MVP — prove the core | ☑ |
 | **Phase 2** | Reliability — survive failures | ☐ |
 | **Phase 3** | Scale — multi-Agent and scheduling | ☐ |
 | **Phase 4** | Delivery — observability and docs | ☐ |
