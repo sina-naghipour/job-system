@@ -27,6 +27,11 @@ class JobListResponse(BaseModel):
     jobs: list[dict]
 
 
+class CancelJobResponse(BaseModel):
+    jobId: str
+    state: str
+
+
 def build_router(job_service: JobService, gateway: AgentGateway) -> APIRouter:
     router = APIRouter()
 
@@ -67,6 +72,26 @@ def build_router(job_service: JobService, gateway: AgentGateway) -> APIRouter:
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
         return job.to_result()
+
+    @router.post(
+        "/jobs/{job_id}/cancel",
+        response_model=CancelJobResponse,
+        status_code=202,
+    )
+    async def cancel_job(job_id: str) -> CancelJobResponse:
+        job = job_service.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job.state.is_terminal:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Job is already {job.state.value}",
+            )
+
+        await gateway.send_cancel(job.agent_id, job_id, reason="user")
+        updated = job_service.mark_cancelled(job_id)
+        state = updated.state.value if updated else job.state.value
+        return CancelJobResponse(jobId=job_id, state=state)
 
     return router
 
