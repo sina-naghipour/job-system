@@ -9,6 +9,7 @@ from websockets.asyncio.client import ClientConnection
 
 from packages.agent.decorators import send_result_to_server
 from packages.shared.decorators import capture_execution_errors
+from packages.shared.logging_config import configure_logging
 from packages.shared.protocol import JobMessage, ServerToAgent
 
 log = logging.getLogger(__name__)
@@ -47,7 +48,10 @@ class DockerExecutor:
             stderr = container.logs(stdout=False, stderr=True).decode()
             return int(result["StatusCode"]), stdout, stderr
         finally:
-            container.remove(force=True)
+            try:
+                container.remove(force=True)
+            except Exception:
+                log.exception("Failed to remove container for %s", image)
 
 
 class Agent:
@@ -67,7 +71,11 @@ class Agent:
 
     async def _listen(self, ws: ClientConnection) -> None:
         async for raw in ws:
-            message: ServerToAgent = json.loads(raw)
+            try:
+                message: ServerToAgent = json.loads(raw)
+            except json.JSONDecodeError:
+                log.warning("Ignoring malformed message: %r", raw[:200])
+                continue
             await self._dispatch(ws, message)
 
     async def _dispatch(self, ws: ClientConnection, message: ServerToAgent) -> None:
@@ -104,15 +112,8 @@ class Agent:
         log.warning("Cancel not yet implemented for %s", message["job_id"])
 
 
-def configure_logging() -> None:
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO"),
-        format="%(asctime)s [agent] %(levelname)s %(message)s",
-    )
-
-
 async def main() -> None:
-    configure_logging()
+    configure_logging("agent")
     executor = DockerExecutor()
     agent = Agent(
         agent_id=os.getenv("AGENT_ID", "agent-1"),
