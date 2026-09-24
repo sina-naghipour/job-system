@@ -17,14 +17,18 @@ def new_job_id() -> str:
 
 @dataclass
 class Job:
-    # identity ogf a job
+    # identity
     job_id: str
-    correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     # request
     agent_id: str
     image: str
     command: list[str]
+    timeout_ms: int
+    # request (optional)
     metadata: dict = field(default_factory=dict)
+    idempotency_key: Optional[str] = None
+    # identity (generated)
+    correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     # state machine
     state: JobState = JobState.PENDING
     created_at: str = field(default_factory=now)
@@ -36,10 +40,6 @@ class Job:
     error: Optional[str] = None
     stdout: str = ""
     stderr: str = ""
-    # idempotency
-    idempotency_key: Optional[str] = None
-    
-    timeout_ms: int
     
     def to_dict(self) -> dict:
         return {
