@@ -18,3 +18,20 @@ def capture_execution_errors(fn: ExecutionFn) -> ExecutionFn:
             return 1, "", str(exc)
 
     return wrapper
+
+
+def log_and_swallow(fn: Callable) -> Callable:
+    """Catch and log any exception from an async function. Never re-raise.
+
+    Use for handlers inside long-lived loops where one failure must not
+    terminate the loop.
+    """
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except Exception:
+            log.exception("Handler failed and was swallowed")
+            return None
+
+    return wrapper
