@@ -1,0 +1,29 @@
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id            TEXT PRIMARY KEY,
+    agent_id          TEXT NOT NULL,
+    image             TEXT NOT NULL,
+    command_json      TEXT NOT NULL,
+    timeout_ms        INTEGER NOT NULL,
+    idempotency_key   TEXT,
+    metadata_json     TEXT NOT NULL,
+    state             TEXT NOT NULL,
+    exit_code         INTEGER,
+    error             TEXT,
+    stdout            TEXT NOT NULL DEFAULT '',
+    stderr            TEXT NOT NULL DEFAULT '',
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    started_at        TEXT,
+    finished_at       TEXT,
+    correlation_id    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_agent_state
+    ON jobs (agent_id, state);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_state
+    ON jobs (state);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency
+    ON jobs (idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
