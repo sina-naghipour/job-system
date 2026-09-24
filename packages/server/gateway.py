@@ -6,15 +6,18 @@ from typing import Optional
 import websockets
 from websockets.asyncio.server import ServerConnection
 
-from packages.shared.protocol import AgentToServer, JobMessage, JobState
+from packages.server.decorators import (
+    with_connection_guard,
+    with_dispatch_guard,
+    with_send_guard,
+)
 from packages.server.store import AgentRegistry, JobService
+from packages.shared.protocol import AgentToServer, JobMessage, JobState
 
 log = logging.getLogger(__name__)
 
 
 class AgentGateway:
-    """WebSocket server that accepts outbound connections from Agents."""
-
     def __init__(
         self,
         job_service: JobService,
@@ -40,12 +43,15 @@ class AgentGateway:
             self._dispatch_locks[agent_id] = lock
         return lock
 
+    @with_connection_guard
     async def _handle_connection(self, ws: ServerConnection) -> None:
         agent_id: Optional[str] = None
         try:
             async for raw in ws:
-                message: AgentToServer = json.loads(raw)
-                agent_id = await self._dispatch(ws, message, agent_id)
+                message = self._parse_message(raw)
+                if message is None:
+                    continue
+                agent_id = await self._safe_dispatch(ws, message, agent_id)
         except websockets.ConnectionClosed:
             log.info("Agent disconnected: %s", agent_id)
         finally:
@@ -53,12 +59,33 @@ class AgentGateway:
                 self._agents.unregister(agent_id)
                 self._dispatch_locks.pop(agent_id, None)
 
+    def _parse_message(self, raw: str) -> Optional[AgentToServer]:
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            log.warning("Ignoring malformed message: %r", raw[:200])
+            return None
+
+    @with_dispatch_guard
+    async def _safe_dispatch(
+        self,
+        ws: ServerConnection,
+        message: AgentToServer,
+        agent_id: Optional[str],
+    ) -> Optional[str]:
+        return await self._dispatch(ws, message, agent_id)
+
     async def _dispatch(
         self,
         ws: ServerConnection,
         message: AgentToServer,
         agent_id: Optional[str],
     ) -> Optional[str]:
+        message_type = message.get("type")
+        if message_type is None:
+            log.warning("Message missing 'type' field")
+            return agent_id
+
         handlers = {
             "register": self._on_register,
             "ack": self._on_ack,
@@ -67,9 +94,9 @@ class AgentGateway:
             "result": self._on_result,
             "heartbeat": self._on_heartbeat,
         }
-        handler = handlers.get(message["type"])
+        handler = handlers.get(message_type)
         if handler is None:
-            log.warning("Unknown message type: %s", message["type"])
+            log.warning("Unknown message type: %s", message_type)
             return agent_id
         return await handler(ws, message, agent_id)
 
@@ -102,7 +129,6 @@ class AgentGateway:
     async def _on_log(
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
-        # Live log streaming arrives in Phase 2.
         log.debug("Log chunk for %s", message["job_id"])
         return agent_id
 
@@ -132,17 +158,9 @@ class AgentGateway:
     async def _on_heartbeat(
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
-        # Heartbeat tracking arrives in Phase 2.
         return agent_id
 
     async def dispatch_pending(self, agent_id: str) -> None:
-        """
-        Send any PENDING jobs for this agent, oldest first.
-
-        The per-agent lock ensures that concurrent calls (e.g. an HTTP submit
-        and an agent register arriving at the same time) cannot both observe
-        the same PENDING job and dispatch it twice.
-        """
         async with self._lock_for(agent_id):
             conn = self._agents.get(agent_id)
             if conn is None:
@@ -159,13 +177,11 @@ class AgentGateway:
                     "command": job.command,
                     "timeout_ms": job.timeout_ms,
                 }
-                try:
-                    await conn.ws.send(json.dumps(message))
-                except websockets.ConnectionClosed:
-                    log.warning(
-                        "Failed to dispatch %s: agent %s disconnected",
-                        job.job_id, agent_id,
-                    )
+                if not await self._send(conn.ws, message):
                     return
                 self._job_service.mark_dispatched(job.job_id)
                 log.info("Dispatched %s to %s", job.job_id, agent_id)
+
+    @with_send_guard
+    async def _send(self, ws: ServerConnection, message: dict) -> None:
+        await ws.send(json.dumps(message))
