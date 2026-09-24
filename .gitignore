@@ -27,3 +27,7 @@ $RECYCLE.BIN/
 .coverage.*
 coverage.xml
 htmlcov/
+
+# SQLite
+
+data/
