@@ -5,20 +5,16 @@ import os
 
 import docker
 import websockets
-from websockets.client import WebSocketClientProtocol
+from websockets.asyncio.client import ClientConnection
 
-from packages.shared.protocol import (
-    JobMessage,
-    ResultMessage,
-    ServerToAgent,
-)
+from packages.agent.decorators import send_result_to_server
+from packages.shared.decorators import capture_execution_errors
+from packages.shared.protocol import JobMessage, ServerToAgent
 
 log = logging.getLogger(__name__)
 
 
 class DockerExecutor:
-    """Runs a Job as a Docker container and returns its result."""
-
     def __init__(self) -> None:
         self._client = self._connect()
 
@@ -33,6 +29,7 @@ class DockerExecutor:
                 f"Underlying error: {exc}"
             )
 
+    @capture_execution_errors
     async def run(self, image: str, command: list[str]) -> tuple[int, str, str]:
         return await asyncio.to_thread(self._run_blocking, image, command)
 
@@ -54,14 +51,7 @@ class DockerExecutor:
 
 
 class Agent:
-    """Connects to the Server, receives Jobs, executes them, reports results."""
-
-    def __init__(
-        self,
-        agent_id: str,
-        server_url: str,
-        executor: DockerExecutor,
-    ) -> None:
+    def __init__(self, agent_id: str, server_url: str, executor: DockerExecutor) -> None:
         self._agent_id = agent_id
         self._server_url = server_url
         self._executor = executor
@@ -71,19 +61,16 @@ class Agent:
             await self._register(ws)
             await self._listen(ws)
 
-    async def _register(self, ws: WebSocketClientProtocol) -> None:
-        await ws.send(json.dumps({
-            "type": "register",
-            "agent_id": self._agent_id,
-        }))
+    async def _register(self, ws: ClientConnection) -> None:
+        await ws.send(json.dumps({"type": "register", "agent_id": self._agent_id}))
         log.info("Registered as %s at %s", self._agent_id, self._server_url)
 
-    async def _listen(self, ws: WebSocketClientProtocol) -> None:
+    async def _listen(self, ws: ClientConnection) -> None:
         async for raw in ws:
             message: ServerToAgent = json.loads(raw)
             await self._dispatch(ws, message)
 
-    async def _dispatch(self, ws: WebSocketClientProtocol, message: ServerToAgent) -> None:
+    async def _dispatch(self, ws: ClientConnection, message: ServerToAgent) -> None:
         handlers = {
             "job": self._on_job,
             "cancel": self._on_cancel,
@@ -94,36 +81,26 @@ class Agent:
             return
         await handler(ws, message)
 
-    async def _on_job(self, ws: WebSocketClientProtocol, message: JobMessage) -> None:
+    async def _on_job(self, ws: ClientConnection, message: JobMessage) -> None:
         job_id = message["job_id"]
         log.info("Received job %s: image=%s", job_id, message["image"])
 
         await ws.send(json.dumps({"type": "ack", "job_id": job_id}))
         await ws.send(json.dumps({"type": "started", "job_id": job_id}))
 
-        try:
-            exit_code, stdout, stderr = await self._executor.run(
-                message["image"], message["command"]
-            )
-            error = None
-        except Exception as exc:
-            log.exception("Job %s failed to run", job_id)
-            exit_code, stdout, stderr = 1, "", str(exc)
-            error = str(exc)
+        await self._execute_and_report(ws, job_id, message["image"], message["command"])
 
-        result: ResultMessage = {
-            "type": "result",
-            "job_id": job_id,
-            "exit_code": exit_code,
-            "stdout": stdout,
-            "stderr": stderr,
-            "error": error,
-        }
-        await ws.send(json.dumps(result))
-        log.info("Job %s finished with exit_code=%s", job_id, exit_code)
+    @send_result_to_server
+    async def _execute_and_report(
+        self,
+        ws: ClientConnection,
+        job_id: str,
+        image: str,
+        command: list[str],
+    ) -> tuple[int, str, str]:
+        return await self._executor.run(image, command)
 
-    async def _on_cancel(self, ws: WebSocketClientProtocol, message: dict) -> None:
-        # Cancellation arrives in Phase 2.
+    async def _on_cancel(self, ws: ClientConnection, message: dict) -> None:
         log.warning("Cancel not yet implemented for %s", message["job_id"])
 
 
