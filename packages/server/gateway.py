@@ -12,7 +12,12 @@ from packages.server.decorators import (
     with_send_guard,
 )
 from packages.server.store import AgentRegistry, JobService
-from packages.shared.protocol import AgentToServer, JobMessage, JobState
+from packages.shared.protocol import (
+    AgentToServer,
+    CancelMessage,
+    JobMessage,
+    JobState,
+)
 
 log = logging.getLogger(__name__)
 
@@ -159,6 +164,17 @@ class AgentGateway:
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
         return agent_id
+
+    async def send_cancel(self, agent_id: str, job_id: str, reason: str) -> bool:
+        conn = self._agents.get(agent_id)
+        if conn is None:
+            return False
+        message: CancelMessage = {
+            "type": "cancel",
+            "job_id": job_id,
+            "reason": reason,
+        }
+        return await self._send(conn.ws, message)
 
     async def dispatch_pending(self, agent_id: str) -> None:
         async with self._lock_for(agent_id):
