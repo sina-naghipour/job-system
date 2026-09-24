@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import os
 
 import uvicorn
@@ -11,13 +10,7 @@ from packages.server.store import (
     InMemoryJobRepository,
     JobService,
 )
-
-
-def configure_logging() -> None:
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO"),
-        format="%(asctime)s [server] %(levelname)s %(message)s",
-    )
+from packages.shared.logging_config import configure_logging
 
 
 def build_components() -> tuple[JobService, AgentGateway]:
@@ -41,7 +34,7 @@ async def run_api(app, host: str, port: int) -> None:
 
 
 async def main() -> None:
-    configure_logging()
+    configure_logging("server")
     job_service, gateway = build_components()
 
     api_host = os.getenv("SERVER_HOST", "0.0.0.0")
