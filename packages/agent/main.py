@@ -2,13 +2,12 @@ import asyncio
 import json
 import logging
 import os
+from typing import Optional
 
 import docker
 import websockets
 from websockets.asyncio.client import ClientConnection
 
-from packages.agent.decorators import send_result_to_server
-from packages.shared.decorators import capture_execution_errors
 from packages.shared.logging_config import configure_logging
 from packages.shared.protocol import JobMessage, ServerToAgent
 
@@ -30,18 +29,22 @@ class DockerExecutor:
                 f"Underlying error: {exc}"
             )
 
-    @capture_execution_errors
-    async def run(self, image: str, command: list[str]) -> tuple[int, str, str]:
-        return await asyncio.to_thread(self._run_blocking, image, command)
+    async def start(self, image: str, command: list[str]):
+        return await asyncio.to_thread(self._start_blocking, image, command)
 
-    def _run_blocking(self, image: str, command: list[str]) -> tuple[int, str, str]:
-        container = self._client.containers.run(
+    def _start_blocking(self, image: str, command: list[str]):
+        return self._client.containers.run(
             image=image,
             command=command,
             detach=True,
             stdout=True,
             stderr=True,
         )
+
+    async def wait(self, container) -> tuple[int, str, str]:
+        return await asyncio.to_thread(self._wait_blocking, container)
+
+    def _wait_blocking(self, container) -> tuple[int, str, str]:
         try:
             result = container.wait()
             stdout = container.logs(stdout=True, stderr=False).decode()
@@ -51,14 +54,29 @@ class DockerExecutor:
             try:
                 container.remove(force=True)
             except Exception:
-                log.exception("Failed to remove container for %s", image)
+                log.exception("Failed to remove container")
+
+    async def kill(self, container) -> None:
+        await asyncio.to_thread(self._kill_blocking, container)
+
+    def _kill_blocking(self, container) -> None:
+        try:
+            container.kill()
+        except Exception:
+            log.exception("Failed to kill container")
 
 
 class Agent:
-    def __init__(self, agent_id: str, server_url: str, executor: DockerExecutor) -> None:
+    def __init__(
+        self,
+        agent_id: str,
+        server_url: str,
+        executor: DockerExecutor,
+    ) -> None:
         self._agent_id = agent_id
         self._server_url = server_url
         self._executor = executor
+        self._running: dict[str, object] = {}
 
     async def run(self) -> None:
         async with websockets.connect(self._server_url) as ws:
@@ -94,22 +112,61 @@ class Agent:
         log.info("Received job %s: image=%s", job_id, message["image"])
 
         await ws.send(json.dumps({"type": "ack", "job_id": job_id}))
+
+        try:
+            container = await self._executor.start(
+                message["image"], message["command"]
+            )
+        except Exception as exc:
+            log.exception("Failed to start container for %s", job_id)
+            await self._send_result(ws, job_id, 1, "", str(exc), error=str(exc))
+            return
+
+        self._running[job_id] = container
         await ws.send(json.dumps({"type": "started", "job_id": job_id}))
 
-        await self._execute_and_report(ws, job_id, message["image"], message["command"])
+        try:
+            exit_code, stdout, stderr = await self._executor.wait(container)
+        except Exception as exc:
+            log.exception("Failed while waiting on container for %s", job_id)
+            exit_code, stdout, stderr = 1, "", str(exc)
+        finally:
+            self._running.pop(job_id, None)
 
-    @send_result_to_server
-    async def _execute_and_report(
+        await self._send_result(ws, job_id, exit_code, stdout, stderr)
+
+    async def _on_cancel(self, ws: ClientConnection, message: dict) -> None:
+        job_id = message["job_id"]
+        reason = message.get("reason", "unknown")
+        log.info("Cancel requested for %s (reason=%s)", job_id, reason)
+
+        container = self._running.get(job_id)
+        if container is None:
+            log.warning("No running container for %s", job_id)
+            return
+        await self._executor.kill(container)
+
+    async def _send_result(
         self,
         ws: ClientConnection,
         job_id: str,
-        image: str,
-        command: list[str],
-    ) -> tuple[int, str, str]:
-        return await self._executor.run(image, command)
-
-    async def _on_cancel(self, ws: ClientConnection, message: dict) -> None:
-        log.warning("Cancel not yet implemented for %s", message["job_id"])
+        exit_code: int,
+        stdout: str,
+        stderr: str,
+        error: Optional[str] = None,
+    ) -> None:
+        if error is None and exit_code != 0:
+            error = stderr or f"exit code {exit_code}"
+        result = {
+            "type": "result",
+            "job_id": job_id,
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "error": error,
+        }
+        await ws.send(json.dumps(result))
+        log.info("Job %s finished with exit_code=%s", job_id, exit_code)
 
 
 async def main() -> None:
