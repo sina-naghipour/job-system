@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException
@@ -5,6 +6,8 @@ from pydantic import BaseModel, Field
 
 from packages.server.gateway import AgentGateway
 from packages.server.store import JobService
+
+log = logging.getLogger(__name__)
 
 
 class SubmitJobRequest(BaseModel):
@@ -37,7 +40,10 @@ def build_router(job_service: JobService, gateway: AgentGateway) -> APIRouter:
             idempotency_key=req.idempotencyKey,
             metadata=req.metadata,
         )
-        await gateway.dispatch_pending(req.agentId)
+        try:
+            await gateway.dispatch_pending(req.agentId)
+        except Exception:
+            log.exception("Dispatch after submit failed for %s", job.job_id)
         return SubmitJobResponse(jobId=job.job_id)
 
     @router.get("/jobs", response_model=JobListResponse)
