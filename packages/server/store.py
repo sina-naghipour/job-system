@@ -17,24 +17,30 @@ def new_job_id() -> str:
 
 @dataclass
 class Job:
+    # identity ogf a job
     job_id: str
+    correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # request
     agent_id: str
     image: str
     command: list[str]
-    timeout_ms: int
-    idempotency_key: Optional[str] = None
     metadata: dict = field(default_factory=dict)
+    # state machine
     state: JobState = JobState.PENDING
-    exit_code: Optional[int] = None
-    error: Optional[str] = None
-    stdout: str = ""
-    stderr: str = ""
     created_at: str = field(default_factory=now)
     updated_at: str = field(default_factory=now)
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
-    correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-
+    # outcome
+    exit_code: Optional[int] = None
+    error: Optional[str] = None
+    stdout: str = ""
+    stderr: str = ""
+    # idempotency
+    idempotency_key: Optional[str] = None
+    
+    timeout_ms: int
+    
     def to_dict(self) -> dict:
         return {
             "jobId": self.job_id,
