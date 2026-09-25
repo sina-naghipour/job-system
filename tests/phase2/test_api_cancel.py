@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from packages.server.api import build_app
+from packages.server.event_repository import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker
 from packages.server.log_repository import SQLiteLogRepository
@@ -28,17 +29,20 @@ def setup():
     registry = AgentRegistry()
     broker = LogBroker()
     log_repo = SQLiteLogRepository(":memory:")
+    event_repo = SQLiteEventRepository(":memory:")
     gateway = RecordingGateway(
         job_service=service,
         agent_registry=registry,
         log_broker=broker,
         log_repository=log_repo,
+        event_repository=event_repo,
         host="127.0.0.1",
         port=0,
     )
-    client = TestClient(build_app(service, gateway, broker, log_repo))
+    client = TestClient(build_app(service, gateway, broker, log_repo, event_repo))
     yield client, service, gateway
     log_repo.close()
+    event_repo.close()
 
 
 def _submit(client: TestClient) -> str:
@@ -103,3 +107,13 @@ def test_cancel_sends_to_correct_agent(setup) -> None:
 
     client.post(f"/jobs/{job_id}/cancel")
     assert gateway.cancels == [("agent-7", job_id, "user")]
+
+
+def test_cancel_records_event(setup) -> None:
+    client, service, gateway = setup
+    job_id = _submit(client)
+
+    client.post(f"/jobs/{job_id}/cancel")
+
+    events = gateway._event_repository.list_for_job(job_id)
+    assert any(e["eventType"] == "cancelled" for e in events)

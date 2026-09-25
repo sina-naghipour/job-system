@@ -4,6 +4,7 @@ import pytest
 import websockets
 
 from packages.agent.main import Agent
+from packages.server.event_repository import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker
 from packages.server.log_repository import SQLiteLogRepository
@@ -78,12 +79,14 @@ async def test_full_round_trip() -> None:
     registry = AgentRegistry()
     broker = LogBroker()
     log_repo = SQLiteLogRepository(":memory:")
+    event_repo = SQLiteEventRepository(":memory:")
 
     gateway = AgentGateway(
         job_service=service,
         agent_registry=registry,
         log_broker=broker,
         log_repository=log_repo,
+        event_repository=event_repo,
         host="127.0.0.1",
         port=0,
     )
@@ -113,8 +116,16 @@ async def test_full_round_trip() -> None:
         fetched = service.get(job.job_id)
         assert fetched.state.value == "SUCCEEDED"
         assert fetched.stdout == "stub output"
+
+        events = event_repo.list_for_job(job.job_id)
+        event_types = {e["eventType"] for e in events}
+        assert "dispatched" in event_types
+        assert "ack" in event_types
+        assert "started" in event_types
+        assert "result" in event_types
     finally:
         agent_task.cancel()
         server.close()
         await server.wait_closed()
         log_repo.close()
+        event_repo.close()

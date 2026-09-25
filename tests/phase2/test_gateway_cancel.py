@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from packages.server.event_repository import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker
 from packages.server.log_repository import SQLiteLogRepository
@@ -30,16 +31,19 @@ def setup():
     registry = AgentRegistry()
     broker = LogBroker()
     log_repo = SQLiteLogRepository(":memory:")
+    event_repo = SQLiteEventRepository(":memory:")
     gateway = AgentGateway(
         job_service=service,
         agent_registry=registry,
         log_broker=broker,
         log_repository=log_repo,
+        event_repository=event_repo,
         host="127.0.0.1",
         port=0,
     )
     yield gateway, registry
     log_repo.close()
+    event_repo.close()
 
 
 async def test_send_cancel_returns_false_when_agent_missing(setup) -> None:

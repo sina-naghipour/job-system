@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from packages.server.event_repository import SQLiteEventRepository
 from packages.server.store import (
     InMemoryJobRepository,
     Job,
@@ -30,26 +31,31 @@ def service() -> JobService:
     return JobService(InMemoryJobRepository())
 
 
+@pytest.fixture
+def event_repo() -> SQLiteEventRepository:
+    repo = SQLiteEventRepository(":memory:")
+    yield repo
+    repo.close()
+
+
 def _running_job(
     service: JobService,
     *,
     age_seconds: float,
     timeout_ms: int,
 ) -> Job:
-    """Create a Job and move it to RUNNING with a started_at in the past."""
     job = service.submit("agent-1", "alpine", ["sleep"], timeout_ms)
     service.mark_dispatched(job.job_id)
     service.mark_running(job.job_id)
     started = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
     job.started_at = started.isoformat()
-    service._repository.save(job)
     return job
 
 
-async def test_no_timeout_when_within_budget(service: JobService) -> None:
+async def test_no_timeout_when_within_budget(service: JobService, event_repo) -> None:
     job = _running_job(service, age_seconds=1, timeout_ms=30_000)
     gateway = FakeGateway()
-    watcher = TimeoutWatcher(service, gateway)
+    watcher = TimeoutWatcher(service, gateway, event_repo)
 
     await watcher._scan()
 
@@ -57,30 +63,32 @@ async def test_no_timeout_when_within_budget(service: JobService) -> None:
     assert service.get(job.job_id).state == JobState.RUNNING
 
 
-async def test_timeout_fires_when_exceeded(service: JobService) -> None:
+async def test_timeout_fires_when_exceeded(service: JobService, event_repo) -> None:
     job = _running_job(service, age_seconds=5, timeout_ms=1_000)
     gateway = FakeGateway()
-    watcher = TimeoutWatcher(service, gateway)
+    watcher = TimeoutWatcher(service, gateway, event_repo)
 
     await watcher._scan()
 
     assert gateway.sent == [("agent-1", job.job_id, "timeout")]
     assert service.get(job.job_id).state == JobState.TIMED_OUT
+    events = event_repo.list_for_job(job.job_id)
+    assert any(e["eventType"] == "timed_out" for e in events)
 
 
-async def test_timeout_fires_even_if_agent_offline(service: JobService) -> None:
+async def test_timeout_fires_even_if_agent_offline(service: JobService, event_repo) -> None:
     job = _running_job(service, age_seconds=5, timeout_ms=1_000)
-    watcher = TimeoutWatcher(service, FakeGatewayOffline())
+    watcher = TimeoutWatcher(service, FakeGatewayOffline(), event_repo)
 
     await watcher._scan()
 
     assert service.get(job.job_id).state == JobState.TIMED_OUT
 
 
-async def test_pending_jobs_are_ignored(service: JobService) -> None:
+async def test_pending_jobs_are_ignored(service: JobService, event_repo) -> None:
     job = service.submit("agent-1", "alpine", ["sleep"], 1_000)
     gateway = FakeGateway()
-    watcher = TimeoutWatcher(service, gateway)
+    watcher = TimeoutWatcher(service, gateway, event_repo)
 
     await watcher._scan()
 
@@ -88,42 +96,40 @@ async def test_pending_jobs_are_ignored(service: JobService) -> None:
     assert service.get(job.job_id).state == JobState.PENDING
 
 
-async def test_terminal_jobs_are_ignored(service: JobService) -> None:
+async def test_terminal_jobs_are_ignored(service: JobService, event_repo) -> None:
     job = service.submit("agent-1", "alpine", ["echo"], 1_000)
     service.mark_dispatched(job.job_id)
     service.mark_running(job.job_id)
     service.mark_succeeded(job.job_id, 0, "", "")
 
     gateway = FakeGateway()
-    watcher = TimeoutWatcher(service, gateway)
+    watcher = TimeoutWatcher(service, gateway, event_repo)
 
     await watcher._scan()
 
     assert gateway.sent == []
 
 
-async def test_running_without_started_at_is_ignored(service: JobService) -> None:
+async def test_running_without_started_at_is_ignored(service: JobService, event_repo) -> None:
     job = service.submit("agent-1", "alpine", ["sleep"], 1_000)
     service.mark_dispatched(job.job_id)
     service.mark_running(job.job_id)
-    # Force started_at to None.
     job = service.get(job.job_id)
     job.started_at = None
-    service._repository.save(job)
 
     gateway = FakeGateway()
-    watcher = TimeoutWatcher(service, gateway)
+    watcher = TimeoutWatcher(service, gateway, event_repo)
 
     await watcher._scan()
 
     assert gateway.sent == []
 
 
-async def test_multiple_jobs_each_fire_once(service: JobService) -> None:
+async def test_multiple_jobs_each_fire_once(service: JobService, event_repo) -> None:
     a = _running_job(service, age_seconds=5, timeout_ms=1_000)
     b = _running_job(service, age_seconds=5, timeout_ms=1_000)
     gateway = FakeGateway()
-    watcher = TimeoutWatcher(service, gateway)
+    watcher = TimeoutWatcher(service, gateway, event_repo)
 
     await watcher._scan()
 
@@ -133,14 +139,13 @@ async def test_multiple_jobs_each_fire_once(service: JobService) -> None:
     assert service.get(b.job_id).state == JobState.TIMED_OUT
 
 
-async def test_second_scan_does_not_refire(service: JobService) -> None:
+async def test_second_scan_does_not_refire(service: JobService, event_repo) -> None:
     job = _running_job(service, age_seconds=5, timeout_ms=1_000)
     gateway = FakeGateway()
-    watcher = TimeoutWatcher(service, gateway)
+    watcher = TimeoutWatcher(service, gateway, event_repo)
 
     await watcher._scan()
     await watcher._scan()
 
-    # Only the first scan should have sent a cancel.
     assert len(gateway.sent) == 1
     assert gateway.sent[0][1] == job.job_id

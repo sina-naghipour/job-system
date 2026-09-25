@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from packages.server.api import build_app
+from packages.server.event_repository import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker
 from packages.server.log_repository import SQLiteLogRepository
@@ -18,17 +19,20 @@ def setup():
     registry = AgentRegistry()
     broker = LogBroker()
     log_repo = SQLiteLogRepository(":memory:")
+    event_repo = SQLiteEventRepository(":memory:")
     gateway = AgentGateway(
         job_service=service,
         agent_registry=registry,
         log_broker=broker,
         log_repository=log_repo,
+        event_repository=event_repo,
         host="127.0.0.1",
         port=0,
     )
-    client = TestClient(build_app(service, gateway, broker, log_repo))
+    client = TestClient(build_app(service, gateway, broker, log_repo, event_repo))
     yield client
     log_repo.close()
+    event_repo.close()
 
 
 @pytest.fixture

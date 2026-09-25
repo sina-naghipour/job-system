@@ -262,7 +262,7 @@ class AgentGateway:
                 self._job_service.mark_dispatched_with_attempt(job.job_id)
                 self._event_repository.append(
                     job.job_id, "dispatched",
-                    {"attempt": job.dispatch_attempts + 1},
+                    {"attempt": job.dispatch_attempts},
                 )
                 log.info("Job dispatched", extra=self._log_extra(job.job_id))
 
