@@ -19,6 +19,7 @@ from packages.shared.protocol import (
     JobMessage,
     JobState,
 )
+from packages.server.log_repository import SQLiteLogRepository
 
 log = logging.getLogger(__name__)
 
@@ -29,12 +30,14 @@ class AgentGateway:
         job_service: JobService,
         agent_registry: AgentRegistry,
         log_broker: LogBroker,
+        log_repository: SQLiteLogRepository,
         host: str = "0.0.0.0",
         port: int = 8080,
     ) -> None:
         self._job_service = job_service
         self._agents = agent_registry
         self._log_broker = log_broker
+        self._log_repository = log_repository
         self._host = host
         self._port = port
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
@@ -140,6 +143,12 @@ class AgentGateway:
         self._log_broker.publish(
             job_id=message["job_id"],
             stream=message["stream"],
+            chunk=message["chunk"],
+        )
+        self._log_repository.append(
+            job_id=message["job_id"],
+            stream=message["stream"],
+            sequence=message["sequence"],
             chunk=message["chunk"],
         )
         return agent_id
