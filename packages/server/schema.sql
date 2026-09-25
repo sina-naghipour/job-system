@@ -40,3 +40,14 @@ CREATE TABLE IF NOT EXISTS job_logs (
 
 CREATE INDEX IF NOT EXISTS idx_job_logs_job
     ON job_logs (job_id, sequence);
+
+CREATE TABLE IF NOT EXISTS job_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id      TEXT NOT NULL,
+    event_type  TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_events_job
+    ON job_events (job_id, id);
