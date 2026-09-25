@@ -9,6 +9,9 @@ from packages.server.store import (
     JobService,
 )
 
+from packages.server.log_broker import LogBroker
+
+
 
 class FakeWebSocket:
     def __init__(self) -> None:
@@ -25,7 +28,13 @@ class FakeWebSocket:
 def setup() -> tuple[JobService, AgentGateway, AgentRegistry]:
     service = JobService(InMemoryJobRepository())
     registry = AgentRegistry()
-    gateway = AgentGateway(service, registry, host="127.0.0.1", port=0)
+    gateway = AgentGateway(
+        job_service=service,
+        agent_registry=registry,
+        log_broker=LogBroker(),
+        host="127.0.0.1",
+        port=0,
+    )
     return service, gateway, registry
 
 

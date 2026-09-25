@@ -11,6 +11,7 @@ from packages.server.error_handling_decorators import (
     with_dispatch_guard,
     with_send_guard,
 )
+from packages.server.log_broker import LogBroker
 from packages.server.store import AgentRegistry, JobService
 from packages.shared.protocol import (
     AgentToServer,
@@ -27,11 +28,13 @@ class AgentGateway:
         self,
         job_service: JobService,
         agent_registry: AgentRegistry,
+        log_broker: LogBroker,
         host: str = "0.0.0.0",
         port: int = 8080,
     ) -> None:
         self._job_service = job_service
         self._agents = agent_registry
+        self._log_broker = log_broker
         self._host = host
         self._port = port
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
@@ -134,7 +137,11 @@ class AgentGateway:
     async def _on_log(
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
-        log.debug("Log chunk for %s", message["job_id"])
+        self._log_broker.publish(
+            job_id=message["job_id"],
+            stream=message["stream"],
+            chunk=message["chunk"],
+        )
         return agent_id
 
     async def _on_result(

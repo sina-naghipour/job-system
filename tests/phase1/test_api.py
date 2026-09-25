@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from packages.server.api import build_app
 from packages.server.gateway import AgentGateway
+from packages.server.log_broker import LogBroker
 from packages.server.store import (
     AgentRegistry,
     InMemoryJobRepository,
@@ -13,9 +14,14 @@ from packages.server.store import (
 @pytest.fixture
 def client() -> TestClient:
     service = JobService(InMemoryJobRepository())
-    gateway = AgentGateway(service, AgentRegistry(), host="127.0.0.1", port=0)
+    gateway = AgentGateway(
+        service,
+        AgentRegistry(),
+        LogBroker(),
+        host="127.0.0.1",
+        port=0,
+    )
     return TestClient(build_app(service, gateway))
-
 
 def _payload(**overrides) -> dict:
     base = {

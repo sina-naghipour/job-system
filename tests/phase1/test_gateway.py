@@ -10,6 +10,9 @@ from packages.server.store import (
     JobService,
 )
 
+from packages.server.log_broker import LogBroker
+
+
 
 class FakeWebSocket:
     def __init__(self, fail_on_send: bool = False) -> None:
@@ -24,12 +27,18 @@ class FakeWebSocket:
 
 
 @pytest.fixture
-def setup() -> tuple[JobService, AgentGateway, AgentRegistry]:
+def setup() -> tuple[JobService, AgentGateway, AgentRegistry, LogBroker]:
     service = JobService(InMemoryJobRepository())
     registry = AgentRegistry()
-    gateway = AgentGateway(service, registry, host="127.0.0.1", port=0)
+    broker = LogBroker()
+    gateway = AgentGateway(
+        job_service=service,
+        agent_registry=registry,
+        log_broker=broker,
+        host="127.0.0.1",
+        port=0,
+    )
     return service, gateway, registry
-
 
 def _advance_to_running(service: JobService, job_id: str) -> None:
     service.mark_dispatched(job_id)
@@ -111,7 +120,7 @@ async def test_result_with_infra_error(setup) -> None:
     assert fetched.error == "docker daemon unreachable"
 
 
-async def test_log_ignored(setup) -> None:
+async def test_log_message_publishes(setup) -> None:
     service, gateway, _ = setup
     job = service.submit("a1", "alpine", ["echo"], 1000)
     result = await gateway._dispatch(FakeWebSocket(), {
@@ -153,3 +162,21 @@ async def test_dispatch_pending_send_fails(setup) -> None:
     service.submit("a1", "alpine", ["echo"], 1000)
     registry.register("a1", FakeWebSocket(fail_on_send=True))
     await gateway.dispatch_pending("a1")
+
+async def test_log_message_publishes_to_broker(setup) -> None:
+    service, gateway, _ = setup
+    # The setup fixture must expose the broker. Adjust accordingly.
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+
+    await gateway._dispatch(FakeWebSocket(), {
+        "type": "log",
+        "job_id": job.job_id,
+        "stream": "stdout",
+        "sequence": 1,
+        "chunk": "hello",
+    }, "a1")
+
+    history = gateway._log_broker.history(job.job_id)
+    assert len(history) == 1
+    assert history[0].chunk == "hello"
+    assert history[0].stream == "stdout"

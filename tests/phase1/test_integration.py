@@ -11,6 +11,8 @@ from packages.server.store import (
     JobService,
 )
 
+from packages.server.log_broker import LogBroker
+
 
 class StubContainer:
     def __init__(self) -> None:
@@ -47,7 +49,13 @@ class StubExecutor:
 async def test_full_round_trip() -> None:
     service = JobService(InMemoryJobRepository())
     registry = AgentRegistry()
-    gateway = AgentGateway(service, registry, host="127.0.0.1", port=0)
+    gateway = AgentGateway(
+        job_service=service,
+        agent_registry=registry,
+        log_broker=LogBroker(),
+        host="127.0.0.1",
+        port=0,
+    )
 
     server = await websockets.serve(gateway._handle_connection, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]

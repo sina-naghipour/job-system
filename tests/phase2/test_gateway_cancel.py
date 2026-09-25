@@ -2,8 +2,17 @@ import json
 
 import pytest
 
+import json
+
+import pytest
+
 from packages.server.gateway import AgentGateway
-from packages.server.store import AgentRegistry, InMemoryJobRepository, JobService
+from packages.server.log_broker import LogBroker
+from packages.server.store import (
+    AgentRegistry,
+    InMemoryJobRepository,
+    JobService,
+)
 
 
 class FakeWebSocket:
@@ -22,7 +31,13 @@ class FakeWebSocket:
 def setup():
     service = JobService(InMemoryJobRepository())
     registry = AgentRegistry()
-    gateway = AgentGateway(service, registry, host="127.0.0.1", port=0)
+    gateway = AgentGateway(
+        job_service=service,
+        agent_registry=registry,
+        log_broker=LogBroker(),
+        host="127.0.0.1",
+        port=0,
+    )
     return gateway, registry
 
 

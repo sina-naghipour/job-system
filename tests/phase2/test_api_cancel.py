@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 
 from packages.server.api import build_app
 from packages.server.gateway import AgentGateway
+from packages.server.log_broker import LogBroker
 from packages.server.store import (
     AgentRegistry,
     InMemoryJobRepository,
@@ -24,10 +25,15 @@ class RecordingGateway(AgentGateway):
 def setup():
     service = JobService(InMemoryJobRepository())
     registry = AgentRegistry()
-    gateway = RecordingGateway(service, registry, host="127.0.0.1", port=0)
+    gateway = RecordingGateway(
+        job_service=service,
+        agent_registry=registry,
+        log_broker=LogBroker(),
+        host="127.0.0.1",
+        port=0,
+    )
     client = TestClient(build_app(service, gateway))
     return client, service, gateway
-
 
 def _submit(client: TestClient) -> str:
     r = client.post("/jobs", json={
