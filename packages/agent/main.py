@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 from typing import AsyncGenerator, Optional
 
 import docker
@@ -12,6 +13,11 @@ from packages.shared.logging_config import configure_logging
 from packages.shared.protocol import JobMessage, ServerToAgent
 
 log = logging.getLogger(__name__)
+
+HEARTBEAT_INTERVAL_SECONDS = 10.0
+RECONNECT_INITIAL_DELAY = 1.0
+RECONNECT_MAX_DELAY = 30.0
+RECONNECT_JITTER_MAX = 0.5
 
 
 class DockerExecutor:
@@ -99,13 +105,52 @@ class Agent:
         self._sequences: dict[str, int] = {}
 
     async def run(self) -> None:
-        async with websockets.connect(self._server_url) as ws:
-            await self._register(ws)
+        delay = RECONNECT_INITIAL_DELAY
+        while True:
+            try:
+                async with websockets.connect(self._server_url) as ws:
+                    delay = RECONNECT_INITIAL_DELAY
+                    await self._session(ws)
+            except (OSError, websockets.ConnectionClosed) as exc:
+                log.warning("Connection lost: %s", exc)
+            except Exception:
+                log.exception("Unexpected error in agent session")
+
+            jitter = random.uniform(0, RECONNECT_JITTER_MAX)
+            wait = min(delay + jitter, RECONNECT_MAX_DELAY)
+            log.info("Reconnecting in %.2fs", wait)
+            await asyncio.sleep(wait)
+            delay = min(delay * 2, RECONNECT_MAX_DELAY)
+
+    async def _session(self, ws: ClientConnection) -> None:
+        await self._register(ws)
+
+        heartbeat_task = asyncio.create_task(self._heartbeat(ws))
+        try:
             await self._listen(ws)
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def _register(self, ws: ClientConnection) -> None:
         await ws.send(json.dumps({"type": "register", "agent_id": self._agent_id}))
         log.info("Registered as %s at %s", self._agent_id, self._server_url)
+
+    async def _heartbeat(self, ws: ClientConnection) -> None:
+        try:
+            while True:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+                await ws.send(json.dumps({
+                    "type": "heartbeat",
+                    "agent_id": self._agent_id,
+                }))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Heartbeat failed")
 
     async def _listen(self, ws: ClientConnection) -> None:
         async for raw in ws:
