@@ -7,6 +7,7 @@ import uvicorn
 from packages.server.ack_watcher import AckWatcher
 from packages.server.api import build_app
 from packages.server.gateway import AgentGateway
+from packages.server.heartbeat_watcher import HeartbeatWatcher
 from packages.server.log_broker import LogBroker
 from packages.server.log_repository import SQLiteLogRepository
 from packages.server.sqlite_repository import SQLiteJobRepository
@@ -38,6 +39,7 @@ def build_components(
         host=host,
         port=ws_port,
     )
+
     timeout_watcher = TimeoutWatcher(job_service=job_service, gateway=gateway)
     ack_watcher = AckWatcher(
         job_service=job_service,
@@ -45,6 +47,8 @@ def build_components(
         ack_timeout_seconds=ack_timeout,
         max_dispatch_attempts=max_attempts,
     )
+    heartbeat_watcher = HeartbeatWatcher(agent_registry=registry)
+
     return (
         job_service,
         gateway,
@@ -53,6 +57,7 @@ def build_components(
         log_repository,
         timeout_watcher,
         ack_watcher,
+        heartbeat_watcher,
     )
 
 
@@ -80,6 +85,7 @@ async def main() -> None:
         log_repository,
         timeout_watcher,
         ack_watcher,
+        heartbeat_watcher,
     ) = build_components(host, ws_port, db_path, ack_timeout, max_attempts)
 
     app = build_app(job_service, gateway, log_broker, log_repository)
@@ -95,6 +101,7 @@ async def main() -> None:
             run_api(app, host, api_port),
             timeout_watcher.run(),
             ack_watcher.run(),
+            heartbeat_watcher.run(),
         )
     except asyncio.CancelledError:
         log.info("Server shutting down")
