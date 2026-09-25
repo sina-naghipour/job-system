@@ -4,12 +4,10 @@ import os
 
 import uvicorn
 
-from packages.server.ack_watcher import AckWatcher
 from packages.server.api import build_app
 from packages.server.gateway import AgentGateway
-from packages.server.heartbeat_watcher import HeartbeatWatcher
 from packages.server.services import AgentRegistry, JobService, LogBroker
-from packages.server.timeouts import TimeoutWatcher
+from packages.server.watchers import AckWatcher, HeartbeatWatcher, TimeoutWatcher
 from packages.shared.logging_config import configure_logging
 
 from packages.server.repositories import (

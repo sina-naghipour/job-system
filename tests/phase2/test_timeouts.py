@@ -6,7 +6,7 @@ from packages.server.repositories import SQLiteEventRepository
 from packages.server.repositories import InMemoryJobRepository
 from packages.server.services import JobService
 from packages.server.domain import Job
-from packages.server.timeouts import TimeoutWatcher
+from packages.server.watchers import TimeoutWatcher
 from packages.shared.protocol import JobState
 
 

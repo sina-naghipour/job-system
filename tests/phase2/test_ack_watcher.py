@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from packages.server.ack_watcher import AckWatcher
+from packages.server.watchers import AckWatcher
 from packages.server.repositories import InMemoryJobRepository
 from packages.server.services import JobService
 from packages.shared.protocol import JobState

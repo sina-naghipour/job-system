@@ -1,10 +1,10 @@
-import asyncio
 import logging
 from datetime import datetime, timezone
 
-from packages.server.repositories import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
+from packages.server.repositories import SQLiteEventRepository
 from packages.server.services import JobService
+from packages.server.watchers.base import BaseWatcher
 from packages.shared.protocol import JobState
 
 log = logging.getLogger(__name__)
@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 DEFAULT_SCAN_INTERVAL = 1.0
 
 
-class TimeoutWatcher:
+class TimeoutWatcher(BaseWatcher):
     def __init__(
         self,
         job_service: JobService,
@@ -20,19 +20,10 @@ class TimeoutWatcher:
         event_repository: SQLiteEventRepository,
         scan_interval: float = DEFAULT_SCAN_INTERVAL,
     ) -> None:
+        super().__init__(scan_interval=scan_interval)
         self._job_service = job_service
         self._gateway = gateway
         self._event_repository = event_repository
-        self._scan_interval = scan_interval
-
-    async def run(self) -> None:
-        log.info("Timeout watcher started", extra={"interval": self._scan_interval})
-        while True:
-            try:
-                await self._scan()
-            except Exception:
-                log.exception("Timeout scan failed")
-            await asyncio.sleep(self._scan_interval)
 
     async def _scan(self) -> None:
         now = datetime.now(timezone.utc)

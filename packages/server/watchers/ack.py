@@ -1,10 +1,10 @@
-import asyncio
 import logging
 from datetime import datetime, timezone
 
-from packages.server.repositories import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
+from packages.server.repositories import SQLiteEventRepository
 from packages.server.services import JobService
+from packages.server.watchers.base import BaseWatcher
 from packages.shared.protocol import JobState
 
 log = logging.getLogger(__name__)
@@ -14,7 +14,7 @@ DEFAULT_ACK_TIMEOUT_SECONDS = 5.0
 DEFAULT_MAX_DISPATCH_ATTEMPTS = 3
 
 
-class AckWatcher:
+class AckWatcher(BaseWatcher):
     def __init__(
         self,
         job_service: JobService,
@@ -24,28 +24,12 @@ class AckWatcher:
         max_dispatch_attempts: int = DEFAULT_MAX_DISPATCH_ATTEMPTS,
         scan_interval: float = DEFAULT_SCAN_INTERVAL,
     ) -> None:
+        super().__init__(scan_interval=scan_interval)
         self._job_service = job_service
         self._gateway = gateway
         self._event_repository = event_repository
         self._ack_timeout_seconds = ack_timeout_seconds
         self._max_dispatch_attempts = max_dispatch_attempts
-        self._scan_interval = scan_interval
-
-    async def run(self) -> None:
-        log.info(
-            "Ack watcher started",
-            extra={
-                "ack_timeout_seconds": self._ack_timeout_seconds,
-                "max_dispatch_attempts": self._max_dispatch_attempts,
-                "scan_interval": self._scan_interval,
-            },
-        )
-        while True:
-            try:
-                await self._scan()
-            except Exception:
-                log.exception("Ack scan failed")
-            await asyncio.sleep(self._scan_interval)
 
     async def _scan(self) -> None:
         now = datetime.now(timezone.utc)
