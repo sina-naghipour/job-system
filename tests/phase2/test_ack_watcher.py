@@ -4,7 +4,7 @@ import pytest
 
 from packages.server.ack_watcher import AckWatcher
 from packages.server.repositories import InMemoryJobRepository
-from packages.server.store import AgentRegistry, JobService
+from packages.server.services import JobService
 from packages.shared.protocol import JobState
 
 from packages.server.repositories import SQLiteEventRepository

@@ -8,8 +8,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from packages.server.gateway import AgentGateway
-from packages.server.log_broker import LogBroker, LogChunk
-from packages.server.store import JobService
+from packages.server.services import JobService, LogBroker, LogChunk
 
 from packages.server.repositories import (
     SQLiteEventRepository,

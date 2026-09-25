@@ -3,9 +3,9 @@ from fastapi.testclient import TestClient
 
 from packages.server.api import build_app
 from packages.server.gateway import AgentGateway
-from packages.server.log_broker import LogBroker
 from packages.server.repositories import InMemoryJobRepository
-from packages.server.store import AgentRegistry, JobService
+from packages.server.services import LogBroker
+from packages.server.services import JobService, AgentRegistry
 
 from packages.server.repositories import SQLiteLogRepository, SQLiteEventRepository
 

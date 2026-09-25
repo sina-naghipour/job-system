@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from packages.server.store import AgentRegistry
+from packages.server.services import AgentRegistry
 
 log = logging.getLogger(__name__)
 

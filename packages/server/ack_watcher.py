@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from packages.server.repositories import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
-from packages.server.store import JobService
+from packages.server.services import JobService
 from packages.shared.protocol import JobState
 
 log = logging.getLogger(__name__)

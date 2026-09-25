@@ -3,7 +3,7 @@ import time
 from packages.shared.protocol import JobState
 from packages.server.domain import Job
 from packages.server.repositories import InMemoryJobRepository
-from packages.server.store import AgentRegistry, JobService
+from packages.server.services import JobService, AgentRegistry
 
 # ---------------------------------------------------------------------------
 # Repository

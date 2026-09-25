@@ -1,4 +1,4 @@
-from packages.server.log_broker import LogBroker
+from packages.server.services import LogBroker
 
 
 def test_publish_assigns_sequence_per_stream() -> None:
