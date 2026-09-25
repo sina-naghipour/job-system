@@ -2,7 +2,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from packages.server.store import now
+from packages.server.domain import now
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 

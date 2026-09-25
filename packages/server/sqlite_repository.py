@@ -3,7 +3,9 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from packages.server.store import Job, JobRepository, now
+from packages.server.domain import Job, now
+from packages.server.store import JobRepository
+
 from packages.shared.protocol import JobState
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"

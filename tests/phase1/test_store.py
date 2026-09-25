@@ -1,13 +1,12 @@
 import time
 
 from packages.shared.protocol import JobState
+from packages.server.domain import Job
 from packages.server.store import (
     AgentRegistry,
     InMemoryJobRepository,
-    Job,
     JobService,
 )
-
 
 # ---------------------------------------------------------------------------
 # Repository

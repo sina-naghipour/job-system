@@ -1,7 +1,7 @@
 import pytest
 
 from packages.server.sqlite_repository import SQLiteJobRepository
-from packages.server.store import Job
+from packages.server.domain import Job
 from packages.shared.protocol import JobState
 
 
