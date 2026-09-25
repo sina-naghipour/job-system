@@ -35,6 +35,8 @@ class Job:
     updated_at: str = field(default_factory=now)
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
+    # dispatch
+    dispatch_attempts: int = 0
     # outcome
     exit_code: Optional[int] = None
     error: Optional[str] = None
@@ -58,6 +60,7 @@ class Job:
             "startedAt": self.started_at,
             "finishedAt": self.finished_at,
             "correlationId": self.correlation_id,
+            "dispatchAttempts": self.dispatch_attempts,
         }
 
     def to_result(self) -> dict:

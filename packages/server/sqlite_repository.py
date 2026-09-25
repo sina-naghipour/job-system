@@ -43,6 +43,7 @@ class SQLiteJobRepository(JobRepository):
             started_at=row["started_at"],
             finished_at=row["finished_at"],
             correlation_id=row["correlation_id"],
+            dispatch_attempts=row["dispatch_attempts"],
         )
 
     def _fetch(self, job_id: str) -> Optional[Job]:
@@ -59,8 +60,8 @@ class SQLiteJobRepository(JobRepository):
                     job_id, agent_id, image, command_json, timeout_ms,
                     idempotency_key, metadata_json, state, exit_code, error,
                     stdout, stderr, created_at, updated_at, started_at,
-                    finished_at, correlation_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    finished_at, correlation_id, dispatch_attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.job_id,
@@ -80,6 +81,7 @@ class SQLiteJobRepository(JobRepository):
                     job.started_at,
                     job.finished_at,
                     job.correlation_id,
+                    job.dispatch_attempts,
                 ),
             )
             return job
@@ -131,7 +133,7 @@ class SQLiteJobRepository(JobRepository):
                 idempotency_key = ?, metadata_json = ?, state = ?,
                 exit_code = ?, error = ?, stdout = ?, stderr = ?,
                 created_at = ?, updated_at = ?, started_at = ?,
-                finished_at = ?, correlation_id = ?
+                finished_at = ?, correlation_id = ?, dispatch_attempts = ?
             WHERE job_id = ?
             """,
             (
@@ -151,6 +153,7 @@ class SQLiteJobRepository(JobRepository):
                 job.started_at,
                 job.finished_at,
                 job.correlation_id,
+                job.dispatch_attempts,
                 job.job_id,
             ),
         )
