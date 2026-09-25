@@ -79,6 +79,10 @@ class AgentConnection:
     agent_id: str
     ws: object
     connected_at: str = field(default_factory=now)
+    last_heartbeat_at: str = field(default_factory=now)
+
+    def touch(self) -> None:
+        self.last_heartbeat_at = now()
 
 
 class JobRepository(ABC):
@@ -325,3 +329,17 @@ class AgentRegistry:
 
     def all(self) -> list[AgentConnection]:
         return list(self._agents.values())
+
+    def touch(self, agent_id: str) -> None:
+        conn = self._agents.get(agent_id)
+        if conn is not None:
+            conn.touch()
+
+    def stale_agents(self, max_idle_seconds: float) -> list[AgentConnection]:
+        cutoff = datetime.now(timezone.utc).timestamp() - max_idle_seconds
+        stale: list[AgentConnection] = []
+        for conn in self._agents.values():
+            last = datetime.fromisoformat(conn.last_heartbeat_at).timestamp()
+            if last < cutoff:
+                stale.append(conn)
+        return stale

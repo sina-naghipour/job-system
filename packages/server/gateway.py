@@ -179,6 +179,8 @@ class AgentGateway:
     async def _on_heartbeat(
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
+        if agent_id is not None:
+            self._agents.touch(agent_id)
         return agent_id
 
     async def send_cancel(self, agent_id: str, job_id: str, reason: str) -> bool:
