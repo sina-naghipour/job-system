@@ -6,6 +6,7 @@ import uvicorn
 
 from packages.server.api import build_app
 from packages.server.gateway import AgentGateway
+from packages.server.log_broker import LogBroker
 from packages.server.sqlite_repository import SQLiteJobRepository
 from packages.server.store import AgentRegistry, JobService
 from packages.server.timeouts import TimeoutWatcher
@@ -16,19 +17,21 @@ log = logging.getLogger(__name__)
 
 def build_components(
     host: str, ws_port: int, db_path: str
-) -> tuple[JobService, AgentGateway, SQLiteJobRepository, TimeoutWatcher]:
+) -> tuple[JobService, AgentGateway, LogBroker, SQLiteJobRepository, TimeoutWatcher]:
     repository = SQLiteJobRepository(db_path)
     job_service = JobService(repository)
     registry = AgentRegistry()
+    log_broker = LogBroker()
 
     gateway = AgentGateway(
         job_service=job_service,
         agent_registry=registry,
+        log_broker=log_broker,
         host=host,
         port=ws_port,
     )
     watcher = TimeoutWatcher(job_service=job_service, gateway=gateway)
-    return job_service, gateway, repository, watcher
+    return job_service, gateway, log_broker, repository, watcher
 
 
 async def run_api(app, host: str, port: int) -> None:
@@ -45,10 +48,10 @@ async def main() -> None:
     api_port = int(os.getenv("API_PORT", "8000"))
     db_path = os.getenv("DB_PATH", "data/jobs.db")
 
-    job_service, gateway, repository, watcher = build_components(
+    job_service, gateway, log_broker, repository, watcher = build_components(
         host, ws_port, db_path
     )
-    app = build_app(job_service, gateway)
+    app = build_app(job_service, gateway, log_broker)
 
     log.info(
         "Server starting: ws=ws://%s:%s api=http://%s:%s db=%s",
