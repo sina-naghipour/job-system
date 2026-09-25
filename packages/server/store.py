@@ -42,7 +42,7 @@ class Job:
     error: Optional[str] = None
     stdout: str = ""
     stderr: str = ""
-    
+
     def to_dict(self) -> dict:
         return {
             "jobId": self.job_id,
@@ -122,14 +122,6 @@ class JobRepository(ABC):
 
 
 class InMemoryJobRepository(JobRepository):
-    """
-    In-memory repository.
-
-    Every method that reads-then-writes does so without yielding, so under
-    asyncio (single thread, cooperative scheduling) they are atomic.
-    No locks needed.
-    """
-
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
         self._idempotency: dict[str, str] = {}
@@ -249,6 +241,17 @@ class JobService:
             job_id, JobState.PENDING, JobState.DISPATCHED
         )
 
+    def mark_dispatched_with_attempt(self, job_id: str) -> Optional[Job]:
+        job = self._repository.get(job_id)
+        if job is None:
+            return None
+        if job.state != JobState.PENDING:
+            return job
+        job.state = JobState.DISPATCHED
+        job.dispatch_attempts += 1
+        job.updated_at = now()
+        return self._repository.save(job)
+
     def mark_running(self, job_id: str) -> Optional[Job]:
         return self._repository.transition_if(
             job_id, JobState.DISPATCHED, JobState.RUNNING
@@ -290,6 +293,16 @@ class JobService:
         return self._repository.transition_if(
             job_id, JobState.DISPATCHED, JobState.PENDING
         )
+
+    def fail_stale_dispatch(self, job_id: str, error: str) -> Optional[Job]:
+        job = self._repository.get(job_id)
+        if job is None or job.state.is_terminal:
+            return job
+        job.exit_code = 1
+        job.error = error
+        job.state = JobState.FAILED
+        job.finished_at = now()
+        return self._repository.save(job)
 
 
 class AgentRegistry:
