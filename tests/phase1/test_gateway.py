@@ -3,7 +3,10 @@ import json
 import pytest
 
 from packages.shared.protocol import JobState
+from packages.server.event_repository import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
+from packages.server.log_broker import LogBroker
+from packages.server.log_repository import SQLiteLogRepository
 from packages.server.store import (
     AgentRegistry,
     InMemoryJobRepository,
@@ -27,8 +30,21 @@ class FakeWebSocket:
 def setup() -> tuple[JobService, AgentGateway, AgentRegistry]:
     service = JobService(InMemoryJobRepository())
     registry = AgentRegistry()
-    gateway = AgentGateway(service, registry, host="127.0.0.1", port=0)
-    return service, gateway, registry
+    broker = LogBroker()
+    log_repo = SQLiteLogRepository(":memory:")
+    event_repo = SQLiteEventRepository(":memory:")
+    gateway = AgentGateway(
+        job_service=service,
+        agent_registry=registry,
+        log_broker=broker,
+        log_repository=log_repo,
+        event_repository=event_repo,
+        host="127.0.0.1",
+        port=0,
+    )
+    yield service, gateway, registry
+    log_repo.close()
+    event_repo.close()
 
 
 def _advance_to_running(service: JobService, job_id: str) -> None:
@@ -111,14 +127,90 @@ async def test_result_with_infra_error(setup) -> None:
     assert fetched.error == "docker daemon unreachable"
 
 
-async def test_log_ignored(setup) -> None:
+async def test_log_message_publishes_to_broker(setup) -> None:
     service, gateway, _ = setup
     job = service.submit("a1", "alpine", ["echo"], 1000)
-    result = await gateway._dispatch(FakeWebSocket(), {
-        "type": "log", "job_id": job.job_id,
-        "stream": "stdout", "sequence": 1, "chunk": "x",
+
+    await gateway._dispatch(FakeWebSocket(), {
+        "type": "log",
+        "job_id": job.job_id,
+        "stream": "stdout",
+        "sequence": 1,
+        "chunk": "hello",
     }, "a1")
-    assert result == "a1"
+
+    history = gateway._log_broker.history(job.job_id)
+    assert len(history) == 1
+    assert history[0].chunk == "hello"
+    assert history[0].stream == "stdout"
+
+
+async def test_log_message_persists_to_repository(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+
+    await gateway._dispatch(FakeWebSocket(), {
+        "type": "log",
+        "job_id": job.job_id,
+        "stream": "stdout",
+        "sequence": 1,
+        "chunk": "persisted",
+    }, "a1")
+
+    entries = gateway._log_repository.list_for_job(job.job_id)
+    assert len(entries) == 1
+    assert entries[0]["chunk"] == "persisted"
+
+
+async def test_ack_records_event(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+
+    await gateway._dispatch(
+        FakeWebSocket(), {"type": "ack", "job_id": job.job_id}, "a1"
+    )
+
+    events = gateway._event_repository.list_for_job(job.job_id)
+    assert any(e["eventType"] == "ack" for e in events)
+
+
+async def test_started_records_event(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+    service.mark_dispatched(job.job_id)
+
+    await gateway._dispatch(
+        FakeWebSocket(), {"type": "started", "job_id": job.job_id}, "a1"
+    )
+
+    events = gateway._event_repository.list_for_job(job.job_id)
+    assert any(e["eventType"] == "started" for e in events)
+
+
+async def test_result_records_event(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+    _advance_to_running(service, job.job_id)
+
+    await gateway._dispatch(FakeWebSocket(), {
+        "type": "result", "job_id": job.job_id,
+        "exit_code": 0, "stdout": "", "stderr": "", "error": None,
+    }, "a1")
+
+    events = gateway._event_repository.list_for_job(job.job_id)
+    assert any(e["eventType"] == "result" for e in events)
+
+
+async def test_dispatched_records_event(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+    ws = FakeWebSocket()
+    await gateway._dispatch(ws, {"type": "register", "agent_id": "a1"}, None)
+
+    events = gateway._event_repository.list_for_job(job.job_id)
+    dispatched = [e for e in events if e["eventType"] == "dispatched"]
+    assert len(dispatched) == 1
+    assert dispatched[0]["payload"]["attempt"] == 1
 
 
 async def test_heartbeat_ignored(setup) -> None:

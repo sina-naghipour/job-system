@@ -2,7 +2,10 @@ import asyncio
 
 import pytest
 
+from packages.server.event_repository import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
+from packages.server.log_broker import LogBroker
+from packages.server.log_repository import SQLiteLogRepository
 from packages.server.store import (
     AgentRegistry,
     InMemoryJobRepository,
@@ -15,7 +18,6 @@ class FakeWebSocket:
         self.sent: list[dict] = []
 
     async def send(self, raw: str) -> None:
-        # Yield to give other coroutines a chance to interleave.
         await asyncio.sleep(0)
         import json
         self.sent.append(json.loads(raw))
@@ -25,8 +27,21 @@ class FakeWebSocket:
 def setup() -> tuple[JobService, AgentGateway, AgentRegistry]:
     service = JobService(InMemoryJobRepository())
     registry = AgentRegistry()
-    gateway = AgentGateway(service, registry, host="127.0.0.1", port=0)
-    return service, gateway, registry
+    broker = LogBroker()
+    log_repo = SQLiteLogRepository(":memory:")
+    event_repo = SQLiteEventRepository(":memory:")
+    gateway = AgentGateway(
+        job_service=service,
+        agent_registry=registry,
+        log_broker=broker,
+        log_repository=log_repo,
+        event_repository=event_repo,
+        host="127.0.0.1",
+        port=0,
+    )
+    yield service, gateway, registry
+    log_repo.close()
+    event_repo.close()
 
 
 async def test_concurrent_dispatch_sends_once(setup) -> None:
@@ -35,10 +50,8 @@ async def test_concurrent_dispatch_sends_once(setup) -> None:
     ws = FakeWebSocket()
     registry.register("a1", ws)
 
-    # Fire 20 concurrent dispatches for the same agent.
     await asyncio.gather(*[gateway.dispatch_pending("a1") for _ in range(20)])
 
-    # The job must have been sent exactly once.
     sent_ids = [m["job_id"] for m in ws.sent]
     assert sent_ids.count(job.job_id) == 1
 
@@ -52,15 +65,14 @@ async def test_concurrent_idempotent_submit(setup) -> None:
         ).job_id
 
     ids = await asyncio.gather(*[submit() for _ in range(20)])
-    assert len(set(ids)) == 1  # all 20 calls returned the same job_id
+    assert len(set(ids)) == 1
 
 
 async def test_concurrent_transitions_only_one_wins(setup) -> None:
     service, _, _ = setup
     job = service.submit("a1", "alpine", ["echo"], 1000)
 
-    # 20 concurrent mark_dispatched calls. Only the first should transition.
-    results = await asyncio.gather(*[
+    await asyncio.gather(*[
         asyncio.to_thread(service.mark_dispatched, job.job_id)
         for _ in range(20)
     ])

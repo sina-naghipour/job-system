@@ -17,23 +17,31 @@ def new_job_id() -> str:
 
 @dataclass
 class Job:
+    # identity
     job_id: str
+    # request
     agent_id: str
     image: str
     command: list[str]
     timeout_ms: int
-    idempotency_key: Optional[str] = None
+    # request (optional)
     metadata: dict = field(default_factory=dict)
+    idempotency_key: Optional[str] = None
+    # identity (generated)
+    correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # state machine
     state: JobState = JobState.PENDING
-    exit_code: Optional[int] = None
-    error: Optional[str] = None
-    stdout: str = ""
-    stderr: str = ""
     created_at: str = field(default_factory=now)
     updated_at: str = field(default_factory=now)
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
-    correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # dispatch
+    dispatch_attempts: int = 0
+    # outcome
+    exit_code: Optional[int] = None
+    error: Optional[str] = None
+    stdout: str = ""
+    stderr: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -52,6 +60,7 @@ class Job:
             "startedAt": self.started_at,
             "finishedAt": self.finished_at,
             "correlationId": self.correlation_id,
+            "dispatchAttempts": self.dispatch_attempts,
         }
 
     def to_result(self) -> dict:
@@ -70,6 +79,10 @@ class AgentConnection:
     agent_id: str
     ws: object
     connected_at: str = field(default_factory=now)
+    last_heartbeat_at: str = field(default_factory=now)
+
+    def touch(self) -> None:
+        self.last_heartbeat_at = now()
 
 
 class JobRepository(ABC):
@@ -113,14 +126,6 @@ class JobRepository(ABC):
 
 
 class InMemoryJobRepository(JobRepository):
-    """
-    In-memory repository.
-
-    Every method that reads-then-writes does so without yielding, so under
-    asyncio (single thread, cooperative scheduling) they are atomic.
-    No locks needed.
-    """
-
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
         self._idempotency: dict[str, str] = {}
@@ -240,6 +245,17 @@ class JobService:
             job_id, JobState.PENDING, JobState.DISPATCHED
         )
 
+    def mark_dispatched_with_attempt(self, job_id: str) -> Optional[Job]:
+        job = self._repository.get(job_id)
+        if job is None:
+            return None
+        if job.state != JobState.PENDING:
+            return job
+        job.state = JobState.DISPATCHED
+        job.dispatch_attempts += 1
+        job.updated_at = now()
+        return self._repository.save(job)
+
     def mark_running(self, job_id: str) -> Optional[Job]:
         return self._repository.transition_if(
             job_id, JobState.DISPATCHED, JobState.RUNNING
@@ -282,6 +298,16 @@ class JobService:
             job_id, JobState.DISPATCHED, JobState.PENDING
         )
 
+    def fail_stale_dispatch(self, job_id: str, error: str) -> Optional[Job]:
+        job = self._repository.get(job_id)
+        if job is None or job.state.is_terminal:
+            return job
+        job.exit_code = 1
+        job.error = error
+        job.state = JobState.FAILED
+        job.finished_at = now()
+        return self._repository.save(job)
+
 
 class AgentRegistry:
     def __init__(self) -> None:
@@ -303,3 +329,17 @@ class AgentRegistry:
 
     def all(self) -> list[AgentConnection]:
         return list(self._agents.values())
+
+    def touch(self, agent_id: str) -> None:
+        conn = self._agents.get(agent_id)
+        if conn is not None:
+            conn.touch()
+
+    def stale_agents(self, max_idle_seconds: float) -> list[AgentConnection]:
+        cutoff = datetime.now(timezone.utc).timestamp() - max_idle_seconds
+        stale: list[AgentConnection] = []
+        for conn in self._agents.values():
+            last = datetime.fromisoformat(conn.last_heartbeat_at).timestamp()
+            if last < cutoff:
+                stale.append(conn)
+        return stale

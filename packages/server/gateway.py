@@ -6,24 +6,41 @@ from typing import Optional
 import websockets
 from websockets.asyncio.server import ServerConnection
 
-from packages.shared.protocol import AgentToServer, JobMessage, JobState
+from packages.server.error_handling_decorators import (
+    with_connection_guard,
+    with_dispatch_guard,
+    with_send_guard,
+)
+from packages.server.event_repository import SQLiteEventRepository
+from packages.server.log_broker import LogBroker
+from packages.server.log_repository import SQLiteLogRepository
 from packages.server.store import AgentRegistry, JobService
+from packages.shared.protocol import (
+    AgentToServer,
+    CancelMessage,
+    JobMessage,
+    JobState,
+)
 
 log = logging.getLogger(__name__)
 
 
 class AgentGateway:
-    """WebSocket server that accepts outbound connections from Agents."""
-
     def __init__(
         self,
         job_service: JobService,
         agent_registry: AgentRegistry,
+        log_broker: LogBroker,
+        log_repository: SQLiteLogRepository,
+        event_repository: SQLiteEventRepository,
         host: str = "0.0.0.0",
         port: int = 8080,
     ) -> None:
         self._job_service = job_service
         self._agents = agent_registry
+        self._log_broker = log_broker
+        self._log_repository = log_repository
+        self._event_repository = event_repository
         self._host = host
         self._port = port
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
@@ -40,18 +57,37 @@ class AgentGateway:
             self._dispatch_locks[agent_id] = lock
         return lock
 
+    @with_connection_guard
     async def _handle_connection(self, ws: ServerConnection) -> None:
         agent_id: Optional[str] = None
         try:
             async for raw in ws:
-                message: AgentToServer = json.loads(raw)
-                agent_id = await self._dispatch(ws, message, agent_id)
+                message = self._parse_message(raw)
+                if message is None:
+                    continue
+                agent_id = await self._safe_dispatch(ws, message, agent_id)
         except websockets.ConnectionClosed:
-            log.info("Agent disconnected: %s", agent_id)
+            log.info("Agent disconnected", extra={"agent_id": agent_id})
         finally:
             if agent_id:
                 self._agents.unregister(agent_id)
                 self._dispatch_locks.pop(agent_id, None)
+
+    def _parse_message(self, raw: str) -> Optional[AgentToServer]:
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            log.warning("Ignoring malformed message: %r", raw[:200])
+            return None
+
+    @with_dispatch_guard
+    async def _safe_dispatch(
+        self,
+        ws: ServerConnection,
+        message: AgentToServer,
+        agent_id: Optional[str],
+    ) -> Optional[str]:
+        return await self._dispatch(ws, message, agent_id)
 
     async def _dispatch(
         self,
@@ -59,6 +95,11 @@ class AgentGateway:
         message: AgentToServer,
         agent_id: Optional[str],
     ) -> Optional[str]:
+        message_type = message.get("type")
+        if message_type is None:
+            log.warning("Message missing 'type' field")
+            return agent_id
+
         handlers = {
             "register": self._on_register,
             "ack": self._on_ack,
@@ -66,12 +107,23 @@ class AgentGateway:
             "log": self._on_log,
             "result": self._on_result,
             "heartbeat": self._on_heartbeat,
+            "reconcile": self._on_reconcile,
         }
-        handler = handlers.get(message["type"])
+        handler = handlers.get(message_type)
         if handler is None:
-            log.warning("Unknown message type: %s", message["type"])
+            log.warning("Unknown message type: %s", message_type)
             return agent_id
         return await handler(ws, message, agent_id)
+
+    def _log_extra(self, job_id: str) -> dict:
+        job = self._job_service.get(job_id)
+        if job is None:
+            return {"job_id": job_id}
+        return {
+            "job_id": job.job_id,
+            "correlation_id": job.correlation_id,
+            "agent_id": job.agent_id,
+        }
 
     async def _on_register(
         self,
@@ -81,29 +133,44 @@ class AgentGateway:
     ) -> str:
         new_agent_id = message["agent_id"]
         self._agents.register(new_agent_id, ws)
-        log.info("Agent registered: %s", new_agent_id)
+        log.info("Agent registered", extra={"agent_id": new_agent_id})
         await self.dispatch_pending(new_agent_id)
         return new_agent_id
 
     async def _on_ack(
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
-        log.debug("Ack for %s", message["job_id"])
+        job_id = message["job_id"]
+        self._event_repository.append(job_id, "ack")
+        log.debug("Ack received", extra=self._log_extra(job_id))
         return agent_id
 
     async def _on_started(
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
-        job = self._job_service.mark_running(message["job_id"])
+        job_id = message["job_id"]
+        job = self._job_service.mark_running(job_id)
         if job:
-            log.info("Job %s is RUNNING", job.job_id)
+            self._event_repository.append(
+                job_id, "started", {"state": job.state.value}
+            )
+            log.info("Job is RUNNING", extra=self._log_extra(job_id))
         return agent_id
 
     async def _on_log(
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
-        # Live log streaming arrives in Phase 2.
-        log.debug("Log chunk for %s", message["job_id"])
+        self._log_broker.publish(
+            job_id=message["job_id"],
+            stream=message["stream"],
+            chunk=message["chunk"],
+        )
+        self._log_repository.append(
+            job_id=message["job_id"],
+            stream=message["stream"],
+            sequence=message["sequence"],
+            chunk=message["chunk"],
+        )
         return agent_id
 
     async def _on_result(
@@ -123,26 +190,56 @@ class AgentGateway:
             job = self._job_service.mark_failed(job_id, exit_code, stdout, stderr)
 
         if job:
+            self._event_repository.append(
+                job_id,
+                "result",
+                {"state": job.state.value, "exit_code": job.exit_code},
+            )
             log.info(
-                "Job %s finished: state=%s exit_code=%s",
-                job.job_id, job.state.value, job.exit_code,
+                "Job finished",
+                extra={
+                    **self._log_extra(job_id),
+                    "state": job.state.value,
+                    "exit_code": job.exit_code,
+                },
             )
         return agent_id
 
     async def _on_heartbeat(
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
-        # Heartbeat tracking arrives in Phase 2.
+        if agent_id is not None:
+            self._agents.touch(agent_id)
         return agent_id
 
-    async def dispatch_pending(self, agent_id: str) -> None:
-        """
-        Send any PENDING jobs for this agent, oldest first.
+    async def _on_reconcile(
+        self, ws: ServerConnection, message: dict, agent_id: Optional[str]
+    ) -> Optional[str]:
+        job_id = message["job_id"]
+        self._event_repository.append(
+            job_id, "reconciled", {"status": message.get("status")}
+        )
+        log.info(
+            "Reconcile received",
+            extra={
+                **self._log_extra(job_id),
+                "status": message.get("status"),
+            },
+        )
+        return agent_id
 
-        The per-agent lock ensures that concurrent calls (e.g. an HTTP submit
-        and an agent register arriving at the same time) cannot both observe
-        the same PENDING job and dispatch it twice.
-        """
+    async def send_cancel(self, agent_id: str, job_id: str, reason: str) -> bool:
+        conn = self._agents.get(agent_id)
+        if conn is None:
+            return False
+        message: CancelMessage = {
+            "type": "cancel",
+            "job_id": job_id,
+            "reason": reason,
+        }
+        return await self._send(conn.ws, message)
+
+    async def dispatch_pending(self, agent_id: str) -> None:
         async with self._lock_for(agent_id):
             conn = self._agents.get(agent_id)
             if conn is None:
@@ -155,17 +252,21 @@ class AgentGateway:
                 message: JobMessage = {
                     "type": "job",
                     "job_id": job.job_id,
+                    "correlation_id": job.correlation_id,
                     "image": job.image,
                     "command": job.command,
                     "timeout_ms": job.timeout_ms,
                 }
-                try:
-                    await conn.ws.send(json.dumps(message))
-                except websockets.ConnectionClosed:
-                    log.warning(
-                        "Failed to dispatch %s: agent %s disconnected",
-                        job.job_id, agent_id,
-                    )
-                    return
-                self._job_service.mark_dispatched(job.job_id)
-                log.info("Dispatched %s to %s", job.job_id, agent_id)
+            if not await self._send(conn.ws, message):
+                return
+            updated = self._job_service.mark_dispatched_with_attempt(job.job_id)
+            attempt = updated.dispatch_attempts if updated else job.dispatch_attempts
+            self._event_repository.append(
+                job.job_id, "dispatched",
+                {"attempt": attempt},
+            )
+            log.info("Job dispatched", extra=self._log_extra(job.job_id))
+
+    @with_send_guard
+    async def _send(self, ws: ServerConnection, message: dict) -> None:
+        await ws.send(json.dumps(message))
