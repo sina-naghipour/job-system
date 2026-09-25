@@ -1,13 +1,19 @@
+import asyncio
+import json
 import logging
-from typing import Optional
+from typing import AsyncGenerator, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from packages.server.gateway import AgentGateway
+from packages.server.log_broker import LogBroker, LogChunk
 from packages.server.store import JobService
 
 log = logging.getLogger(__name__)
+
+POLL_INTERVAL_SECONDS = 0.5
 
 
 class SubmitJobRequest(BaseModel):
@@ -32,7 +38,24 @@ class CancelJobResponse(BaseModel):
     state: str
 
 
-def build_router(job_service: JobService, gateway: AgentGateway) -> APIRouter:
+def _format_log_event(chunk: LogChunk) -> str:
+    payload = json.dumps({
+        "stream": chunk.stream,
+        "sequence": chunk.sequence,
+        "chunk": chunk.chunk,
+    })
+    return f"event: log\ndata: {payload}\n\n"
+
+
+def _format_end_event() -> str:
+    return "event: end\ndata: {}\n\n"
+
+
+def build_router(
+    job_service: JobService,
+    gateway: AgentGateway,
+    log_broker: LogBroker,
+) -> APIRouter:
     router = APIRouter()
 
     @router.post("/jobs", response_model=SubmitJobResponse, status_code=202)
@@ -93,10 +116,65 @@ def build_router(job_service: JobService, gateway: AgentGateway) -> APIRouter:
         state = updated.state.value if updated else job.state.value
         return CancelJobResponse(jobId=job_id, state=state)
 
+    @router.get("/jobs/{job_id}/logs/live")
+    async def stream_logs(job_id: str) -> StreamingResponse:
+        job = job_service.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        return StreamingResponse(
+            _log_stream(job_service, log_broker, job_id),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     return router
 
 
-def build_app(job_service: JobService, gateway: AgentGateway) -> FastAPI:
+async def _log_stream(
+    job_service: JobService,
+    log_broker: LogBroker,
+    job_id: str,
+) -> AsyncGenerator[str, None]:
+    queue, history = log_broker.subscribe(job_id)
+    try:
+        for chunk in history:
+            yield _format_log_event(chunk)
+
+        job = job_service.get(job_id)
+        if job is not None and job.state.is_terminal:
+            yield _format_end_event()
+            return
+
+        while True:
+            try:
+                chunk = await asyncio.wait_for(queue.get(), timeout=POLL_INTERVAL_SECONDS)
+                yield _format_log_event(chunk)
+                continue
+            except asyncio.TimeoutError:
+                pass
+
+            job = job_service.get(job_id)
+            if job is None or job.state.is_terminal:
+                break
+
+        while not queue.empty():
+            yield _format_log_event(queue.get_nowait())
+
+        yield _format_end_event()
+    finally:
+        log_broker.unsubscribe(job_id, queue)
+
+
+def build_app(
+    job_service: JobService,
+    gateway: AgentGateway,
+    log_broker: LogBroker,
+) -> FastAPI:
     app = FastAPI(title="Job System API", version="0.1.0")
-    app.include_router(build_router(job_service, gateway))
+    app.include_router(build_router(job_service, gateway, log_broker))
     return app

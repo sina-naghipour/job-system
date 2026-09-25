@@ -14,14 +14,16 @@ from packages.server.store import (
 @pytest.fixture
 def client() -> TestClient:
     service = JobService(InMemoryJobRepository())
+    registry = AgentRegistry()
+    broker = LogBroker()
     gateway = AgentGateway(
-        service,
-        AgentRegistry(),
-        LogBroker(),
+        job_service=service,
+        agent_registry=registry,
+        log_broker=broker,
         host="127.0.0.1",
         port=0,
     )
-    return TestClient(build_app(service, gateway))
+    return TestClient(build_app(service, gateway, broker))
 
 def _payload(**overrides) -> dict:
     base = {

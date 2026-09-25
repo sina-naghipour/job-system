@@ -25,14 +25,15 @@ class RecordingGateway(AgentGateway):
 def setup():
     service = JobService(InMemoryJobRepository())
     registry = AgentRegistry()
+    broker = LogBroker()
     gateway = RecordingGateway(
         job_service=service,
         agent_registry=registry,
-        log_broker=LogBroker(),
+        log_broker=broker,
         host="127.0.0.1",
         port=0,
     )
-    client = TestClient(build_app(service, gateway))
+    client = TestClient(build_app(service, gateway, broker))
     return client, service, gateway
 
 def _submit(client: TestClient) -> str:
