@@ -86,6 +86,7 @@ AgentToServer = (
 class JobMessage(TypedDict):
     type: Literal["job"]
     job_id: str
+    correlation_id: str
     image: str
     command: list[str]
     timeout_ms: int

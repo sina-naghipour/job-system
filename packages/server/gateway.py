@@ -64,7 +64,7 @@ class AgentGateway:
                     continue
                 agent_id = await self._safe_dispatch(ws, message, agent_id)
         except websockets.ConnectionClosed:
-            log.info("Agent disconnected: %s", agent_id)
+            log.info("Agent disconnected", extra={"agent_id": agent_id})
         finally:
             if agent_id:
                 self._agents.unregister(agent_id)
@@ -112,6 +112,16 @@ class AgentGateway:
             return agent_id
         return await handler(ws, message, agent_id)
 
+    def _log_extra(self, job_id: str) -> dict:
+        job = self._job_service.get(job_id)
+        if job is None:
+            return {"job_id": job_id}
+        return {
+            "job_id": job.job_id,
+            "correlation_id": job.correlation_id,
+            "agent_id": job.agent_id,
+        }
+
     async def _on_register(
         self,
         ws: ServerConnection,
@@ -120,22 +130,23 @@ class AgentGateway:
     ) -> str:
         new_agent_id = message["agent_id"]
         self._agents.register(new_agent_id, ws)
-        log.info("Agent registered: %s", new_agent_id)
+        log.info("Agent registered", extra={"agent_id": new_agent_id})
         await self.dispatch_pending(new_agent_id)
         return new_agent_id
 
     async def _on_ack(
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
-        log.debug("Ack for %s", message["job_id"])
+        log.debug("Ack received", extra=self._log_extra(message["job_id"]))
         return agent_id
 
     async def _on_started(
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
-        job = self._job_service.mark_running(message["job_id"])
+        job_id = message["job_id"]
+        job = self._job_service.mark_running(job_id)
         if job:
-            log.info("Job %s is RUNNING", job.job_id)
+            log.info("Job is RUNNING", extra=self._log_extra(job_id))
         return agent_id
 
     async def _on_log(
@@ -172,8 +183,12 @@ class AgentGateway:
 
         if job:
             log.info(
-                "Job %s finished: state=%s exit_code=%s",
-                job.job_id, job.state.value, job.exit_code,
+                "Job finished",
+                extra={
+                    **self._log_extra(job_id),
+                    "state": job.state.value,
+                    "exit_code": job.exit_code,
+                },
             )
         return agent_id
 
@@ -188,8 +203,11 @@ class AgentGateway:
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
         log.info(
-            "Reconcile: agent %s reports job %s is %s",
-            agent_id, message["job_id"], message.get("status"),
+            "Reconcile received",
+            extra={
+                **self._log_extra(message["job_id"]),
+                "status": message.get("status"),
+            },
         )
         return agent_id
 
@@ -217,6 +235,7 @@ class AgentGateway:
                 message: JobMessage = {
                     "type": "job",
                     "job_id": job.job_id,
+                    "correlation_id": job.correlation_id,
                     "image": job.image,
                     "command": job.command,
                     "timeout_ms": job.timeout_ms,
@@ -224,7 +243,7 @@ class AgentGateway:
                 if not await self._send(conn.ws, message):
                     return
                 self._job_service.mark_dispatched_with_attempt(job.job_id)
-                log.info("Dispatched %s to %s", job.job_id, agent_id)
+                log.info("Job dispatched", extra=self._log_extra(job.job_id))
 
     @with_send_guard
     async def _send(self, ws: ServerConnection, message: dict) -> None:

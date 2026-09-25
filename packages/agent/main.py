@@ -137,6 +137,7 @@ class Agent:
         self._executor = executor
         self._running: dict[str, object] = {}
         self._sequences: dict[str, int] = {}
+        self._correlations: dict[str, str] = {}
 
     async def run(self) -> None:
         delay = RECONNECT_INITIAL_DELAY
@@ -146,13 +147,13 @@ class Agent:
                     delay = RECONNECT_INITIAL_DELAY
                     await self._session(ws)
             except (OSError, websockets.ConnectionClosed) as exc:
-                log.warning("Connection lost: %s", exc)
+                log.warning("Connection lost", extra={"error": str(exc)})
             except Exception:
                 log.exception("Unexpected error in agent session")
 
             jitter = random.uniform(0, RECONNECT_JITTER_MAX)
             wait = min(delay + jitter, RECONNECT_MAX_DELAY)
-            log.info("Reconnecting in %.2fs", wait)
+            log.info("Reconnecting", extra={"wait_seconds": round(wait, 2)})
             await asyncio.sleep(wait)
             delay = min(delay * 2, RECONNECT_MAX_DELAY)
 
@@ -172,7 +173,10 @@ class Agent:
 
     async def _register(self, ws: ClientConnection) -> None:
         await ws.send(json.dumps({"type": "register", "agent_id": self._agent_id}))
-        log.info("Registered as %s at %s", self._agent_id, self._server_url)
+        log.info(
+            "Registered with server",
+            extra={"agent_id": self._agent_id, "server_url": self._server_url},
+        )
 
     async def _heartbeat(self, ws: ClientConnection) -> None:
         try:
@@ -195,7 +199,8 @@ class Agent:
             return
 
         if containers:
-            log.info("Reconcile: found %d managed container(s)", len(containers))
+            log.info("Reconcile: found managed containers",
+                     extra={"count": len(containers)})
 
         for container in containers:
             job_id = container.labels.get("job_id")
@@ -206,7 +211,8 @@ class Agent:
 
             status = container.status
             if status == "running":
-                log.info("Reconcile: job %s still running; reattaching", job_id)
+                log.info("Reconcile: job still running; reattaching",
+                         extra={"job_id": job_id})
                 await ws.send(json.dumps({
                     "type": "reconcile",
                     "job_id": job_id,
@@ -218,23 +224,22 @@ class Agent:
                 asyncio.create_task(self._reattach(ws, job_id, container))
 
             elif status in ("exited", "dead"):
-                log.info("Reconcile: job %s already exited; reporting", job_id)
+                log.info("Reconcile: job already exited; reporting",
+                         extra={"job_id": job_id})
                 exit_code, stdout, stderr = await self._executor.inspect_exited(container)
                 await self._send_result(ws, job_id, exit_code, stdout, stderr)
                 await self._executor.remove(container)
 
             else:
-                log.warning(
-                    "Reconcile: job %s in unexpected state %s; leaving alone",
-                    job_id, status,
-                )
+                log.warning("Reconcile: unexpected container state",
+                            extra={"job_id": job_id, "status": status})
 
     async def _reattach(self, ws: ClientConnection, job_id: str, container) -> None:
         try:
             exit_code, stdout, stderr = await self._executor.wait(container)
             await self._send_result(ws, job_id, exit_code, stdout, stderr)
         except Exception:
-            log.exception("Reattach failed for %s", job_id)
+            log.exception("Reattach failed", extra={"job_id": job_id})
         finally:
             self._running.pop(job_id, None)
 
@@ -258,9 +263,20 @@ class Agent:
             return
         await handler(ws, message)
 
+    def _extra(self, job_id: str) -> dict:
+        extra = {"job_id": job_id, "agent_id": self._agent_id}
+        correlation_id = self._correlations.get(job_id)
+        if correlation_id:
+            extra["correlation_id"] = correlation_id
+        return extra
+
     async def _on_job(self, ws: ClientConnection, message: JobMessage) -> None:
         job_id = message["job_id"]
-        log.info("Received job %s: image=%s", job_id, message["image"])
+        correlation_id = message.get("correlation_id")
+        if correlation_id:
+            self._correlations[job_id] = correlation_id
+
+        log.info("Received job", extra={**self._extra(job_id), "image": message["image"]})
 
         await ws.send(json.dumps({"type": "ack", "job_id": job_id}))
 
@@ -269,7 +285,7 @@ class Agent:
                 job_id, message["image"], message["command"]
             )
         except Exception as exc:
-            log.exception("Failed to start container for %s", job_id)
+            log.exception("Failed to start container", extra=self._extra(job_id))
             await self._send_result(ws, job_id, 1, "", str(exc), error=str(exc))
             return
 
@@ -290,6 +306,7 @@ class Agent:
                 pass
 
         await self._send_result(ws, job_id, exit_code, stdout, stderr)
+        self._correlations.pop(job_id, None)
 
     async def _stream(self, ws: ClientConnection, job_id: str, container) -> None:
         try:
@@ -306,18 +323,18 @@ class Agent:
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("Log streaming failed for %s", job_id)
+            log.exception("Log streaming failed", extra=self._extra(job_id))
         finally:
             self._sequences.pop(job_id, None)
 
     async def _on_cancel(self, ws: ClientConnection, message: dict) -> None:
         job_id = message["job_id"]
         reason = message.get("reason", "unknown")
-        log.info("Cancel requested for %s (reason=%s)", job_id, reason)
+        log.info("Cancel requested", extra={**self._extra(job_id), "reason": reason})
 
         container = self._running.get(job_id)
         if container is None:
-            log.warning("No running container for %s", job_id)
+            log.warning("No running container", extra=self._extra(job_id))
             return
         await self._executor.kill(container)
 
@@ -341,7 +358,10 @@ class Agent:
             "error": error,
         }
         await ws.send(json.dumps(result))
-        log.info("Job %s finished with exit_code=%s", job_id, exit_code)
+        log.info(
+            "Job finished",
+            extra={**self._extra(job_id), "exit_code": exit_code},
+        )
 
 
 async def main() -> None:
