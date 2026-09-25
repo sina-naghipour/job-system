@@ -22,6 +22,7 @@ A user submits a Job via HTTP. The system routes it to a specific Agent inside a
 - Scheduling Policy
 - Tech Stack
 - Quick Start
+- Evidence
 
 ---
 
@@ -32,7 +33,7 @@ A user submits a Job via HTTP. The system routes it to a specific Agent inside a
 │                          USER                               │
 │              (CLI, curl, or any HTTP client)                │
 └───────────────────────────┬─────────────────────────────────┘
-                            │ REST + WebSocket (live logs)
+                            │ REST + WebSocket / SSE
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    CONTROL PLANE (Server)                   │
@@ -42,7 +43,7 @@ A user submits a Job via HTTP. The system routes it to a specific Agent inside a
 │   ─────────────────────────────────────────────────────    │
 │                                                             │
 │              Job Orchestrator / State Machine               │
-│   Routing │ Idempotency │ Timeout │ Retry │ Reconcile       │
+│   Routing │ Idempotency │ Timeout │ Ack │ Reconcile         │
 │                                                             │
 │   ─────────────────────────────────────────────────────    │
 │                                                             │
@@ -73,7 +74,7 @@ The project is delivered in four phases. Each phase is a milestone, a PR, and a 
 | Phase | Focus | Status |
 |-------|-------|--------|
 | **Phase 1** | MVP — prove the core | ☑ |
-| **Phase 2** | Reliability — survive failures | ☐ |
+| **Phase 2** | Reliability — survive failures | ☑ |
 | **Phase 3** | Scale — multi-Agent and scheduling | ☐ |
 | **Phase 4** | Delivery — observability and docs | ☐ |
 
@@ -99,10 +100,8 @@ A working end-to-end system where a user submits a Job over HTTP, the Server rou
 | Docker execution | Agent runs the Job inside a container |
 | Job lifecycle | `PENDING → DISPATCHED → RUNNING → SUCCEEDED / FAILED` |
 | Idempotency | Duplicate `idempotencyKey` returns the existing Job |
-| Timeout | Jobs exceeding `timeoutMs` are marked `TIMED_OUT` |
-| Live logs | Agent streams `stdout`/`stderr` to the Server in real time |
-| Result retrieval | User fetches `exitCode` and `error` after completion |
 | Async submission | `POST /jobs` returns immediately with `jobId`; HTTP does not block |
+| Race-free transitions | Per-Agent dispatch lock, atomic idempotency, compare-and-swap state transitions |
 
 ### Job Submission Fields
 
@@ -116,15 +115,6 @@ Every Job submission must include:
 | `timeoutMs` | yes | Maximum runtime before the Job is `TIMED_OUT` |
 | `idempotencyKey` | yes | Prevents duplicate execution of the same request |
 | `metadata` | no | Arbitrary user data attached to the Job |
-
-### Explicitly Out of Scope
-
-- Persistence across Server restarts
-- Reconnect and heartbeat
-- Reconciliation of orphan containers
-- Multi-Agent routing
-- Priority scheduling
-- Observability beyond basic logs
 
 ### State Machine
 
@@ -148,23 +138,9 @@ Every Job submission must include:
         └───────────┘  └────────┘  └───────────┘ └──────────┘ └───────────┘
 ```
 
-### Demo
-
-1. Start the Server.
-2. Start one Agent.
-3. `POST /jobs` with a simple command.
-4. `GET /jobs/{id}` shows the Job moving through states.
-5. `GET /jobs/{id}/result` returns the `exitCode`.
-
 ### Deliverable
 
-A running system that proves the core dispatch loop works end-to-end.
-
-### Commit
-
-```
-feat: MVP — end-to-end job dispatch with Docker execution
-```
+A running system that proves the core dispatch loop works end-to-end. 83 tests, 97.84% coverage. Tag `v0.1.0`.
 
 ---
 
@@ -182,16 +158,18 @@ A system where every Job is durably tracked, every state transition is enforced,
 
 | Capability | Description |
 |------------|-------------|
-| Persistence | Jobs, Agents, Logs, Events stored in SQLite (Postgres-ready) |
-| Formal state machine | All transitions enforced through a single function |
+| Persistence | Jobs, Logs, Events stored in SQLite |
 | Durable final logs | Final log persisted as an artifact, independent of live stream |
 | Live stream independence | User disconnect never interrupts Job execution |
-| Agent reconnect | Exponential backoff, automatic reconnection |
+| Agent reconnect | Exponential backoff (1s → 30s) with jitter |
 | Heartbeat | Agent liveness tracked; offline detection after missed beats |
 | Ack-based delivery | Agent acknowledges each Job before state advances |
+| Timeout enforcement | `timeoutMs` fires `cancel`; Agent kills the container |
+| Cancellation | `POST /jobs/{id}/cancel` for user-initiated cancel |
+| Live log streaming | SSE endpoint with per-subscriber backpressure |
 | Agent reconcile | On restart, Agent scans local containers and reports results |
-| Server reconcile | On restart, Server reloads Jobs and re-dispatches pending work |
-| Structured logging | `jobId`, `agentId`, `correlationId` on every log line |
+| Structured logging | JSON logs with `jobId`, `agentId`, `correlationId` |
+| Job event history | Append-only audit trail per Job |
 | Duplicate suppression | Same `idempotencyKey` returns the same Job, always |
 
 ### Explicitly Out of Scope
@@ -206,31 +184,19 @@ A system where every Job is durably tracked, every state transition is enforced,
 |---------|----------|
 | Agent offline at submit | Job stays `PENDING`, queued until Agent returns |
 | Agent disconnects mid-run | State preserved; on reconnect, Agent reconciles container |
+| Agent silently drops (network) | Heartbeat watcher marks Agent offline after 30s |
 | Agent restarts | Agent scans Docker, reports results for known Jobs |
 | Server restarts | Reloads Jobs from DB, re-accepts Agents, reconciles in-flight |
 | Duplicate `idempotencyKey` | Returns the existing `jobId`, no new Job |
+| No ack from Agent | Requeue, up to 3 attempts, then `FAILED` |
 | Live log client disconnects | Job continues; final log still persisted |
 | Log storage temporarily down | Buffered in memory with a cap; never blocks execution |
-| Orphan container | Detected on Agent startup, reported as `FAILED` or resumed |
+| Orphan container | Detected on Agent startup, reported or resumed |
 | Timeout reached | Server sends `cancel`; Agent kills container; state → `TIMED_OUT` |
-
-### Demo
-
-1. Submit a long Job, then kill the Agent mid-run.
-2. Restart the Agent — it reconciles and the Job completes.
-3. Kill the Server, restart it — state is preserved.
-4. Submit the same `idempotencyKey` twice — one Job, one execution.
-5. Drop the live log connection — the Job keeps running.
 
 ### Deliverable
 
-A system that a reviewer can break on purpose and watch recover.
-
-### Commit
-
-```
-feat: production-grade reliability — persistence, reconnect, reconcile
-```
+A system that a reviewer can break on purpose and watch recover. 165 tests, 87.37% coverage. Tags `v0.2.1` through `v0.2.8` and `v0.3.0`.
 
 ---
 
@@ -279,23 +245,9 @@ Rules:
 
 This adapts CPU scheduling to distributed execution: preemption is expensive (killing a container), so it is rare; idempotency keys — which have no CPU equivalent — ensure retries are safe.
 
-### Demo
-
-1. Start two Agents.
-2. Submit a batch Job and an interactive Job — the interactive one runs first.
-3. Submit Jobs to `agent-1` and `agent-2` — each runs on the correct Agent.
-4. Submit a Job, let it time out, observe demotion and longer timeout on retry.
-5. Leave a Job pending for a long time — aging promotes it.
-
 ### Deliverable
 
 A system that demonstrates correct routing and a defensible scheduling policy.
-
-### Commit
-
-```
-feat: multi-agent routing and MLFQ-style scheduler
-```
 
 ---
 
@@ -313,9 +265,6 @@ A professional repository that a reviewer can clone, run, and understand in minu
 
 | Capability | Description |
 |------------|-------------|
-| Structured JSON logging | Machine-readable logs with consistent fields |
-| Correlation ID | Generated at submission, propagated to Agent and logs |
-| Job event history | Append-only audit trail per Job |
 | Health endpoints | `/health` and `/ready` |
 | Metrics endpoint | `/metrics` in Prometheus format |
 | README | Architecture, roadmap, decisions, trade-offs |
@@ -326,22 +275,9 @@ A professional repository that a reviewer can clone, run, and understand in minu
 | Failure scenarios | Reproducible scripts for each failure mode |
 | `env.example` | Documented environment configuration |
 
-### Demo
-
-1. `docker compose up` — Server and two Agents start.
-2. `./scripts/demo.sh` — submits Jobs, shows live logs, kills an Agent, restarts it, and shows reconciliation.
-3. `GET /metrics` — exposes scheduler and Job metrics.
-4. README — a reviewer reads it and understands the whole system.
-
 ### Deliverable
 
 A repository that a reviewer can run, break, and understand without reading the source.
-
-### Commit
-
-```
-docs: observability, README, AI_USAGE, and end-to-end demo
-```
 
 ---
 
@@ -373,102 +309,94 @@ A Job Record contains:
 | `exitCode`, `error` | Termination status |
 | `createdAt`, `updatedAt` | Accounting |
 | `correlationId` | Traceability |
+| `dispatchAttempts` | Retry count |
 | Logs | Output / context |
 | `priority` (Phase 3) | Scheduling priority |
-| `attempts` (Phase 3) | Retry count |
 
 So the Job Record is the **PCB of a Job** — the single, durable structure that holds everything the Server needs to know about a Job's identity, state, context, and lifecycle.
 
 ### Where the analogy is exact
 
-- **State machine:** PCB has process states; the Job has Job states. Same idea.
+- **State machine:** PCB has process states; the Job has Job states.
 - **Dispatcher:** The OS dispatcher picks a ready process for a CPU; the Server dispatcher picks a pending Job for an Agent.
 - **Context switch:** The OS saves and restores the PCB on a switch; the Server updates the Job Record on each state change.
 - **Termination:** The OS records exit status; the Server records `exitCode` and `error`.
 - **Accounting:** The OS tracks CPU time; the Server tracks timestamps and durations.
 
-### Where the analogy breaks (and why it matters)
+### Where the analogy breaks
 
-A PCB lives in **kernel memory**, is **fast**, and is **ephemeral** — it disappears when the process ends. A Job Record lives in a **database**, is **persistent**, and must **survive restarts**. This is a deliberate difference:
-
-- A PCB does not survive a reboot.
-- A Job Record **must** survive a Server restart, because the Job may still be running on a remote Agent.
-
-A PCB also describes a **local** process. A Job Record describes a **remote** execution — the actual container lives on another machine. So the Job Record is more like a **durable, distributed PCB**: it tracks a process that runs somewhere else and must be recoverable after a crash.
+A PCB lives in kernel memory, is fast, and disappears when the process ends. A Job Record lives in a database, is persistent, and must survive restarts. A PCB describes a local process; a Job Record describes a remote execution on another machine. So the Job Record is a **durable, distributed PCB**.
 
 ### Practical implications
 
 Because the Job Record is a PCB, it must:
 
-1. **Be the single source of truth.** No state lives only in memory. Every state change writes to the DB first, then acts.
-2. **Be updated atomically.** Transitions should be transactional (`UPDATE ... WHERE state = 'expected'`) to prevent races.
-3. **Include an event log.** A `job_events` table is the PCB's history — every transition, every ack, every log boundary. It is your audit trail and your debugging tool.
-4. **Have a well-defined lifecycle.** `PENDING → DISPATCHED → RUNNING → terminal`. Same as a process.
-5. **Be queryable.** `GET /jobs/{id}` reads the PCB. `GET /jobs` lists PCBs. `GET /jobs/{id}/events` reads the history.
+1. **Be the single source of truth.** Every state change writes to the DB first, then acts.
+2. **Be updated atomically.** Transitions are single SQL `UPDATE ... WHERE state = ?` statements.
+3. **Include an event log.** The `job_events` table is the PCB's history.
+4. **Have a well-defined lifecycle.** `PENDING → DISPATCHED → RUNNING → terminal`.
+5. **Be queryable.** `GET /jobs/{id}`, `GET /jobs`, `GET /jobs/{id}/events`.
 
 ---
 
 ## Communication Design
 
-The task requires a deliberate decision on how Server and Agent communicate, and an explicit discussion of the following properties. This section documents the choice and the reasoning.
+Two channels.
 
-### Chosen method: WebSocket
+### Agent ↔ Server: WebSocket
 
-| Option | Description | Why chosen / not chosen |
-|--------|-------------|-------------------------|
-| **WebSocket** | Bidirectional, message-based, runs over HTTP/1.1 upgrade | **Chosen.** Simple, outbound-friendly, works behind NAT, well-supported in Python |
-| gRPC bidirectional streaming | HTTP/2-based, Protobuf-typed, built-in deadlines | Rejected for MVP. More setup, harder for browser clients, overkill for JSON messages |
-| Message Broker (RabbitMQ, NATS JetStream) | Decoupled publish/subscribe | Rejected for MVP. Adds infrastructure; useful later for horizontal scaling |
+| Option | Why chosen / not chosen |
+|--------|-------------------------|
+| **WebSocket** | **Chosen.** Outbound-friendly, works behind NAT, bidirectional |
+| gRPC bidirectional streaming | Rejected. More setup, harder for browser clients |
+| Message Broker (RabbitMQ, NATS) | Rejected. Adds infrastructure; deferred to a later phase |
 
-The Agent opens the WebSocket. The Server never dials the Agent. This is what makes the system work across NAT and firewalls.
+The Agent opens the WebSocket. The Server never dials the Agent.
 
-### Properties discussed
+### User ↔ Server: HTTP + SSE
+
+- **HTTP** for Job submission, status, result, logs, events, and cancel.
+- **SSE** for live log streaming. One-way, HTTP-native, browser-friendly.
+
+The dispatch channel (Agent ↔ Server) and the log channel (User ↔ Server) are separate concerns and use different protocols on purpose.
+
+### Properties
 
 | Property | How it is handled |
 |----------|-------------------|
-| **Durability** | Every Job is persisted before dispatch. Messages are not the source of truth; the database is. If a message is lost, the Job is still recoverable from the DB |
-| **Ordering** | Per-Agent ordering is enforced by the single WebSocket connection and a monotonic sequence number on each message. Out-of-order messages are rejected or buffered |
-| **Backpressure** | The Server tracks the Agent's in-flight Job count. If the Agent is saturated, new Jobs stay `PENDING`. The Agent tracks its own Docker capacity and refuses Jobs it cannot run |
-| **Acknowledgement** | Every Job dispatch requires an `ack` from the Agent before the state advances from `DISPATCHED` to `RUNNING`. Unacknowledged Jobs are re-dispatched after a timeout |
-| **Reconnect** | The Agent reconnects with exponential backoff (1s, 2s, 4s, up to 30s). The Server marks the Agent offline after 3 missed heartbeats and queues Jobs for it |
-| **Horizontal scaling** | Multiple Server instances can share the database. Each Agent connects to exactly one Server instance at a time. A future version can use a Message Broker to decouple this |
-
-### Why not a Message Broker (yet)
-
-A Message Broker like RabbitMQ or NATS JetStream would solve durability, ordering, and backpressure at the infrastructure level. It was rejected for the MVP because:
-
-- It adds operational complexity (another service to run, monitor, and secure).
-- The core problem — reliable dispatch to an Agent behind NAT — is solved by the WebSocket plus persistence, not by the Broker.
-- The task explicitly says not all options need to be implemented; one well-justified choice is enough.
-
-The Broker becomes attractive in Phase 3 or later, when horizontal scaling of the Server is needed. It is listed as a future extension, not a requirement.
+| **Durability** | Every Job persisted before dispatch. The database is the source of truth |
+| **Ordering** | Per-Agent ordering enforced by the single WebSocket connection |
+| **Backpressure** | Per-subscriber log queues with a cap. Container never blocked |
+| **Acknowledgement** | Every dispatch requires an `ack`; unacked Jobs requeue |
+| **Reconnect** | Agent reconnects with exponential backoff. Server marks offline after 3 missed heartbeats |
+| **Horizontal scaling** | Future: multiple Server instances sharing the DB |
 
 ---
 
 ## Design Decisions
 
-This section records the research and decisions the task requires.
-
 | Decision | Options considered | Choice | Why |
 |----------|--------------------|--------|-----|
-| Communication method | WebSocket, gRPC, Message Broker | WebSocket | Outbound-friendly, simple, sufficient |
-| Source of truth | In-memory, DB, Broker | Database | Must survive restarts; Jobs are durable |
-| Database | SQLite, Postgres, MongoDB | SQLite (Postgres-ready) | Zero setup for MVP, easy migration later |
-| Live Log transport | WebSocket, SSE, Streaming HTTP | WebSocket | Same protocol as dispatch; bidirectional |
-| Final Log storage | DB column, file, object storage | DB for small, file for large | Trade-off between query and size |
-| Recovery after restart | None, replay from DB, reconcile | Reconcile | Robust against partial failures |
-| Idempotency scope | Per-user, global, per-agent | Global | Simplest, strongest guarantee |
+| Agent ↔ Server communication | WebSocket, gRPC, Message Broker | WebSocket | Outbound-friendly, simple, sufficient |
+| User ↔ Server live logs | WebSocket, SSE, Streaming HTTP | SSE | One-way stream, HTTP-native |
+| Source of truth | In-memory, DB, Broker | Database | Must survive restarts |
+| Database | SQLite, Postgres, MongoDB | SQLite | Zero setup; Postgres-ready |
+| Final Log storage | DB column, file, object storage | `job_logs` table | Queryable, simple |
+| Event storage | DB table, file, external | `job_events` table | Append-only, queryable |
+| Ack timeout | — | 5s (configurable) | Balances latency vs. slow networks |
+| Retry limit | — | 3 attempts | Bounded, prevents permanent locks |
+| Heartbeat interval | — | 10s | Detects silent drops within 30s |
+| Reconnect backoff | — | 1s → 30s with jitter | Standard, avoids thundering herd |
+| Container discovery | — | Docker labels | Standard metadata |
+| Reconciliation | — | Agent-driven | Agent owns local state |
+| Idempotency scope | Per-user, global, per-agent | Global | Strongest guarantee |
 | Job scheduling | FIFO, priority, MLFQ | MLFQ (Phase 3) | Prevents starvation, adapts to behavior |
-| Preemption | None, cancel only, kill + requeue | Cancel + requeue | Cheap enough, safe with idempotency |
-| Multi-Server | Single, shared DB, sharded | Single (MVP), shared DB (future) | Start simple, scale when needed |
-
-Each decision is revisited in the phase where it becomes relevant.
+| Preemption | None, cancel only, kill + requeue | Cancel + requeue | Safe with idempotency |
+| Multi-Server | Single, shared DB, sharded | Single (MVP), shared DB (future) | Start simple |
 
 ---
 
 ## State Machine Details
-
-The task requires precise definitions for the following behaviors. These are the rules the Server enforces.
 
 ### Initial state
 
@@ -476,10 +404,8 @@ A Job always begins in `PENDING`. It is created in this state the moment `POST /
 
 ### Final states
 
-A Job is in a final state when it can no longer transition. The final states are:
-
 - `SUCCEEDED` — container exited with `exitCode = 0`
-- `FAILED` — container exited with non-zero `exitCode`, or the Agent reported an error
+- `FAILED` — container exited with non-zero `exitCode`, or the Agent reported an error, or dispatch retries were exhausted
 - `TIMED_OUT` — the Job exceeded `timeoutMs`
 - `CANCELLED` — the user cancelled the Job
 
@@ -488,8 +414,8 @@ A Job is in a final state when it can no longer transition. The final states are
 | From | To | Trigger |
 |------|----|---------|
 | `PENDING` | `DISPATCHED` | Server sends the Job to an online Agent |
-| `DISPATCHED` | `RUNNING` | Agent acknowledges and starts the container |
-| `DISPATCHED` | `PENDING` | Agent disconnects before ack; Job is requeued |
+| `DISPATCHED` | `RUNNING` | Agent sends `started` |
+| `DISPATCHED` | `PENDING` | Ack timeout or Agent disconnect before start |
 | `RUNNING` | `SUCCEEDED` | Agent reports `exitCode = 0` |
 | `RUNNING` | `FAILED` | Agent reports non-zero `exitCode` or error |
 | `RUNNING` | `TIMED_OUT` | Server timeout fires; Agent kills container |
@@ -500,37 +426,22 @@ Any transition not in this table is invalid and is rejected.
 
 ### Duplicate transition
 
-If the Server receives a message that would trigger a transition that has already happened, it is treated as an **idempotent no-op**. The state remains unchanged, and the message is logged.
+Treated as an idempotent no-op. The state is unchanged and the message is logged.
 
-Example: if the Agent sends `result` twice for the same `jobId`, the second is ignored. The Job stays in its final state.
+### Late result for a final Job
 
-### Late result for an already-final Job
-
-If a `result` message arrives for a Job that is already in a final state, the Server:
-
-1. Records the late result in the `job_events` table.
-2. Does **not** change the Job's state.
-3. Logs a warning with the `jobId`, `correlationId`, and the current state.
-
-This protects against races where the Server times out a Job at the same moment the Agent reports success.
+If a `result` message arrives for a Job already in a final state, the Server records the event in `job_events` and does not change the state.
 
 ### "No result" vs "definite failure"
 
-These are two distinct situations and must be handled differently:
+- **No result yet** — `PENDING`, `DISPATCHED`, or `RUNNING`. The Job is still alive.
+- **Definite failure** — `FAILED`, `TIMED_OUT`, or `CANCELLED`. The Job is finished.
 
-- **No result yet** — the Job is still in `PENDING`, `DISPATCHED`, or `RUNNING`. The Agent has not reported anything. The Job is still considered alive. The Server may eventually time it out, but until then, it is not failed.
-- **Definite failure** — the Job is in `FAILED`, `TIMED_OUT`, or `CANCELLED`. The Agent reported an error, the timeout fired, or the user cancelled. The Job is finished and will not run again.
-
-The distinction matters because:
-
-- A Job with no result may still succeed. It must not be marked `FAILED` prematurely.
-- A Job with a definite failure must not be retried silently. If retry is desired, it must be explicit (new Job with the same `idempotencyKey` would return the old one, so a new key is required).
+The distinction matters: a Job with no result may still succeed; a definitely-failed Job must not be silently retried.
 
 ### Retry policy
 
-The Server does not silently retry failed Jobs. If a Job is `FAILED` or `TIMED_OUT`, the user must submit a new Job (with a new `idempotencyKey`). This keeps the model simple and avoids surprising duplicate side effects.
-
-The one exception is the `DISPATCHED → PENDING` requeue, which is a recovery from a transient network failure, not a retry of execution.
+The Server does not silently retry failed Jobs. The only automatic retry is the `DISPATCHED → PENDING` requeue, which recovers from an unacked dispatch. Execution retries require a new Job with a new `idempotencyKey`.
 
 ---
 
@@ -540,9 +451,11 @@ The one exception is the `DISPATCHED → PENDING` requeue, which is a recovery f
 |----------|-------------------|
 | Agent offline before receiving Job | Job stays `PENDING`, queued |
 | Network drops mid-execution | Agent reconnects; Job state preserved |
+| Agent silently drops | Heartbeat watcher marks offline after 30s |
 | Agent restarts mid-execution | Agent reconciles container state on startup |
 | Server restarts | Reloads Jobs, re-accepts Agents, reconciles |
 | Same `idempotencyKey` sent twice | Existing `jobId` returned |
+| No ack from Agent | Requeue, up to 3 attempts, then `FAILED` |
 | Live log connection drops | Job continues; final log persisted |
 | Agent crashes before reporting result | Reconcile detects orphan container |
 | Log storage unavailable | Buffered in memory, execution never blocked |
@@ -587,10 +500,11 @@ The scheduler adapts the **Multi-Level Feedback Queue (MLFQ)** from OS CPU sched
 | Concern | Choice | Rationale |
 |---------|--------|-----------|
 | Language | Python 3.11+ | Readable, strong async, great Docker SDK |
-| Agent ↔ Server | WebSocket | Outbound-friendly, bidirectional, simple |
-| User ↔ Server | REST + WebSocket | Universal API, streaming for live logs |
-| Execution | Docker | Isolation, portability, standard |
-| Persistence | SQLite (Postgres-ready) | Zero setup for MVP, scalable later |
+| Agent ↔ Server | WebSocket | Outbound-friendly, bidirectional |
+| User ↔ Server (control) | REST | Universal API, easy to test |
+| User ↔ Server (live logs) | SSE | One-way stream, HTTP-native |
+| Execution | Docker | Isolation, portability |
+| Persistence | SQLite | Zero setup; Postgres-ready |
 | API framework | FastAPI | Async, typed, auto docs |
 | Validation | Pydantic | Integrated with FastAPI |
 | Testing | pytest + pytest-asyncio | Standard |
@@ -600,22 +514,66 @@ The scheduler adapts the **Multi-Level Feedback Queue (MLFQ)** from OS CPU sched
 
 ## Quick Start
 
-> Filled in as phases are completed. Placeholder below.
+Requires Python 3.11+, Docker Desktop, and PowerShell.
 
-```bash
+```powershell
 git clone https://github.com/<you>/job-system.git
 cd job-system
 
 python -m venv .venv
-.venv\Scripts\Activate.ps1     # Windows
-# source .venv/bin/activate    # Linux / macOS
+.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+```
 
-pip install -e .
+Three terminals in the project root, venv activated in each.
 
-# Terminal 1
+**Terminal 1 — Server:**
+
+```powershell
 python -m packages.server.main
+```
 
-# Terminal 2
+**Terminal 2 — Agent:**
+
+```powershell
+$env:AGENT_ID = "agent-1"
 python -m packages.agent.main
 ```
 
+**Terminal 3 — Submit a Job:**
+
+```powershell
+$body = @{
+  agentId = "agent-1"
+  image = "alpine:latest"
+  command = @("sh", "-c", "echo hello && sleep 2 && echo done")
+  timeoutMs = 30000
+  idempotencyKey = "quick-start-1"
+} | ConvertTo-Json
+
+$r = Invoke-RestMethod -Uri http://localhost:8000/jobs -Method Post -Body $body -ContentType "application/json"
+Invoke-RestMethod -Uri "http://localhost:8000/jobs/$($r.jobId)/result" | ConvertTo-Json
+```
+
+### Configuration
+
+`env.example` documents every value:
+
+```
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8080
+API_PORT=8000
+AGENT_ID=agent-1
+SERVER_URL=ws://localhost:8080
+LOG_LEVEL=INFO
+DB_PATH=data/jobs.db
+ACK_TIMEOUT_SECONDS=5
+MAX_DISPATCH_ATTEMPTS=3
+```
+
+---
+
+## Evidence
+
+- [Phase 1 Evidence](docs/EVIDENCE_PHASE1.md) — MVP: end-to-end dispatch, 83 tests, 97.84% coverage, `v0.1.0`
+- [Phase 2 Evidence](docs/EVIDENCE_PHASE2.md) — Reliability: persistence, timeouts, logs, ack, heartbeat, reconcile, events, 165 tests, 87.37% coverage, `v0.2.1`–`v0.2.8`, `v0.3.0`
