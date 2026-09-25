@@ -6,7 +6,7 @@ from typing import Optional
 import websockets
 from websockets.asyncio.server import ServerConnection
 
-from packages.server.decorators import (
+from packages.server.error_handling_decorators import (
     with_connection_guard,
     with_dispatch_guard,
     with_send_guard,

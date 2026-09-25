@@ -8,6 +8,7 @@ import docker
 import websockets
 from websockets.asyncio.client import ClientConnection
 
+from packages.agent.error_handling_decorators import capture_job_errors
 from packages.shared.logging_config import configure_logging
 from packages.shared.protocol import JobMessage, ServerToAgent
 
@@ -112,28 +113,24 @@ class Agent:
         log.info("Received job %s: image=%s", job_id, message["image"])
 
         await ws.send(json.dumps({"type": "ack", "job_id": job_id}))
-
-        try:
-            container = await self._executor.start(
-                message["image"], message["command"]
-            )
-        except Exception as exc:
-            log.exception("Failed to start container for %s", job_id)
-            await self._send_result(ws, job_id, 1, "", str(exc), error=str(exc))
-            return
-
-        self._running[job_id] = container
         await ws.send(json.dumps({"type": "started", "job_id": job_id}))
 
-        try:
-            exit_code, stdout, stderr = await self._executor.wait(container)
-        except Exception as exc:
-            log.exception("Failed while waiting on container for %s", job_id)
-            exit_code, stdout, stderr = 1, "", str(exc)
-        finally:
-            self._running.pop(job_id, None)
+        exit_code, stdout, stderr = await self._execute(
+            job_id, message["image"], message["command"]
+        )
 
         await self._send_result(ws, job_id, exit_code, stdout, stderr)
+
+    @capture_job_errors
+    async def _execute(
+        self, job_id: str, image: str, command: list[str]
+    ) -> tuple[int, str, str]:
+        container = await self._executor.start(image, command)
+        self._running[job_id] = container
+        try:
+            return await self._executor.wait(container)
+        finally:
+            self._running.pop(job_id, None)
 
     async def _on_cancel(self, ws: ClientConnection, message: dict) -> None:
         job_id = message["job_id"]
