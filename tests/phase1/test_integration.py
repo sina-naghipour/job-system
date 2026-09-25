@@ -12,9 +12,35 @@ from packages.server.store import (
 )
 
 
+class StubContainer:
+    def __init__(self) -> None:
+        self.killed = False
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def remove(self, force: bool = False) -> None:
+        pass
+
+    def wait(self) -> dict:
+        return {"StatusCode": 0}
+
+    def logs(self, stdout: bool = True, stderr: bool = False) -> bytes:
+        return b"stub output" if stdout else b""
+
+
 class StubExecutor:
-    async def run(self, image: str, command: list[str]) -> tuple[int, str, str]:
+    def __init__(self) -> None:
+        self._container = StubContainer()
+
+    async def start(self, image: str, command: list[str]) -> StubContainer:
+        return self._container
+
+    async def wait(self, container) -> tuple[int, str, str]:
         return 0, "stub output", ""
+
+    async def kill(self, container) -> None:
+        container.kill()
 
 
 @pytest.mark.integration
