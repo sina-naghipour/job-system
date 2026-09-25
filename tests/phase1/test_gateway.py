@@ -4,14 +4,13 @@ import pytest
 
 from packages.shared.protocol import JobState
 from packages.server.gateway import AgentGateway
+from packages.server.log_broker import LogBroker
+from packages.server.log_repository import SQLiteLogRepository
 from packages.server.store import (
     AgentRegistry,
     InMemoryJobRepository,
     JobService,
 )
-
-from packages.server.log_broker import LogBroker
-
 
 
 class FakeWebSocket:
@@ -27,18 +26,22 @@ class FakeWebSocket:
 
 
 @pytest.fixture
-def setup() -> tuple[JobService, AgentGateway, AgentRegistry, LogBroker]:
+def setup() -> tuple[JobService, AgentGateway, AgentRegistry]:
     service = JobService(InMemoryJobRepository())
     registry = AgentRegistry()
     broker = LogBroker()
+    log_repo = SQLiteLogRepository(":memory:")
     gateway = AgentGateway(
         job_service=service,
         agent_registry=registry,
         log_broker=broker,
+        log_repository=log_repo,
         host="127.0.0.1",
         port=0,
     )
-    return service, gateway, registry
+    yield service, gateway, registry
+    log_repo.close()
+
 
 def _advance_to_running(service: JobService, job_id: str) -> None:
     service.mark_dispatched(job_id)
@@ -120,14 +123,39 @@ async def test_result_with_infra_error(setup) -> None:
     assert fetched.error == "docker daemon unreachable"
 
 
-async def test_log_message_publishes(setup) -> None:
+async def test_log_message_publishes_to_broker(setup) -> None:
     service, gateway, _ = setup
     job = service.submit("a1", "alpine", ["echo"], 1000)
-    result = await gateway._dispatch(FakeWebSocket(), {
-        "type": "log", "job_id": job.job_id,
-        "stream": "stdout", "sequence": 1, "chunk": "x",
+
+    await gateway._dispatch(FakeWebSocket(), {
+        "type": "log",
+        "job_id": job.job_id,
+        "stream": "stdout",
+        "sequence": 1,
+        "chunk": "hello",
     }, "a1")
-    assert result == "a1"
+
+    history = gateway._log_broker.history(job.job_id)
+    assert len(history) == 1
+    assert history[0].chunk == "hello"
+    assert history[0].stream == "stdout"
+
+
+async def test_log_message_persists_to_repository(setup) -> None:
+    service, gateway, _ = setup
+    job = service.submit("a1", "alpine", ["echo"], 1000)
+
+    await gateway._dispatch(FakeWebSocket(), {
+        "type": "log",
+        "job_id": job.job_id,
+        "stream": "stdout",
+        "sequence": 1,
+        "chunk": "persisted",
+    }, "a1")
+
+    entries = gateway._log_repository.list_for_job(job.job_id)
+    assert len(entries) == 1
+    assert entries[0]["chunk"] == "persisted"
 
 
 async def test_heartbeat_ignored(setup) -> None:
@@ -162,21 +190,3 @@ async def test_dispatch_pending_send_fails(setup) -> None:
     service.submit("a1", "alpine", ["echo"], 1000)
     registry.register("a1", FakeWebSocket(fail_on_send=True))
     await gateway.dispatch_pending("a1")
-
-async def test_log_message_publishes_to_broker(setup) -> None:
-    service, gateway, _ = setup
-    # The setup fixture must expose the broker. Adjust accordingly.
-    job = service.submit("a1", "alpine", ["echo"], 1000)
-
-    await gateway._dispatch(FakeWebSocket(), {
-        "type": "log",
-        "job_id": job.job_id,
-        "stream": "stdout",
-        "sequence": 1,
-        "chunk": "hello",
-    }, "a1")
-
-    history = gateway._log_broker.history(job.job_id)
-    assert len(history) == 1
-    assert history[0].chunk == "hello"
-    assert history[0].stream == "stdout"

@@ -2,12 +2,9 @@ import json
 
 import pytest
 
-import json
-
-import pytest
-
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker
+from packages.server.log_repository import SQLiteLogRepository
 from packages.server.store import (
     AgentRegistry,
     InMemoryJobRepository,
@@ -31,14 +28,18 @@ class FakeWebSocket:
 def setup():
     service = JobService(InMemoryJobRepository())
     registry = AgentRegistry()
+    broker = LogBroker()
+    log_repo = SQLiteLogRepository(":memory:")
     gateway = AgentGateway(
         job_service=service,
         agent_registry=registry,
-        log_broker=LogBroker(),
+        log_broker=broker,
+        log_repository=log_repo,
         host="127.0.0.1",
         port=0,
     )
-    return gateway, registry
+    yield gateway, registry
+    log_repo.close()
 
 
 async def test_send_cancel_returns_false_when_agent_missing(setup) -> None:

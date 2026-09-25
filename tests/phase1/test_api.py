@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from packages.server.api import build_app
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker
+from packages.server.log_repository import SQLiteLogRepository
 from packages.server.store import (
     AgentRegistry,
     InMemoryJobRepository,
@@ -12,18 +13,28 @@ from packages.server.store import (
 
 
 @pytest.fixture
-def client() -> TestClient:
+def setup():
     service = JobService(InMemoryJobRepository())
     registry = AgentRegistry()
     broker = LogBroker()
+    log_repo = SQLiteLogRepository(":memory:")
     gateway = AgentGateway(
         job_service=service,
         agent_registry=registry,
         log_broker=broker,
+        log_repository=log_repo,
         host="127.0.0.1",
         port=0,
     )
-    return TestClient(build_app(service, gateway, broker))
+    client = TestClient(build_app(service, gateway, broker, log_repo))
+    yield client
+    log_repo.close()
+
+
+@pytest.fixture
+def client(setup) -> TestClient:
+    return setup
+
 
 def _payload(**overrides) -> dict:
     base = {

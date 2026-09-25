@@ -5,13 +5,13 @@ import websockets
 
 from packages.agent.main import Agent
 from packages.server.gateway import AgentGateway
+from packages.server.log_broker import LogBroker
+from packages.server.log_repository import SQLiteLogRepository
 from packages.server.store import (
     AgentRegistry,
     InMemoryJobRepository,
     JobService,
 )
-
-from packages.server.log_broker import LogBroker
 
 
 class StubContainer:
@@ -27,7 +27,15 @@ class StubContainer:
     def wait(self) -> dict:
         return {"StatusCode": 0}
 
-    def logs(self, stdout: bool = True, stderr: bool = False) -> bytes:
+    def logs(
+        self,
+        stream: bool = False,
+        follow: bool = False,
+        stdout: bool = True,
+        stderr: bool = False,
+    ):
+        if stream:
+            return iter([b"stub output"]) if stdout else iter([])
         return b"stub output" if stdout else b""
 
 
@@ -37,6 +45,9 @@ class StubExecutor:
 
     async def start(self, image: str, command: list[str]) -> StubContainer:
         return self._container
+
+    async def stream_logs(self, container):
+        yield "stdout", "stub output"
 
     async def wait(self, container) -> tuple[int, str, str]:
         return 0, "stub output", ""
@@ -49,10 +60,14 @@ class StubExecutor:
 async def test_full_round_trip() -> None:
     service = JobService(InMemoryJobRepository())
     registry = AgentRegistry()
+    broker = LogBroker()
+    log_repo = SQLiteLogRepository(":memory:")
+
     gateway = AgentGateway(
         job_service=service,
         agent_registry=registry,
-        log_broker=LogBroker(),
+        log_broker=broker,
+        log_repository=log_repo,
         host="127.0.0.1",
         port=0,
     )
@@ -63,25 +78,27 @@ async def test_full_round_trip() -> None:
     agent = Agent("agent-1", f"ws://127.0.0.1:{port}", StubExecutor())
     agent_task = asyncio.create_task(agent.run())
 
-    for _ in range(50):
-        if registry.is_online("agent-1"):
-            break
-        await asyncio.sleep(0.05)
-    assert registry.is_online("agent-1")
+    try:
+        for _ in range(50):
+            if registry.is_online("agent-1"):
+                break
+            await asyncio.sleep(0.05)
+        assert registry.is_online("agent-1")
 
-    job = service.submit("agent-1", "alpine", ["echo"], 1000)
-    await gateway.dispatch_pending("agent-1")
+        job = service.submit("agent-1", "alpine", ["echo"], 1000)
+        await gateway.dispatch_pending("agent-1")
 
-    for _ in range(50):
+        for _ in range(50):
+            fetched = service.get(job.job_id)
+            if fetched and fetched.state.is_terminal:
+                break
+            await asyncio.sleep(0.05)
+
         fetched = service.get(job.job_id)
-        if fetched and fetched.state.is_terminal:
-            break
-        await asyncio.sleep(0.05)
-
-    fetched = service.get(job.job_id)
-    assert fetched.state.value == "SUCCEEDED"
-    assert fetched.stdout == "stub output"
-
-    agent_task.cancel()
-    server.close()
-    await server.wait_closed()
+        assert fetched.state.value == "SUCCEEDED"
+        assert fetched.stdout == "stub output"
+    finally:
+        agent_task.cancel()
+        server.close()
+        await server.wait_closed()
+        log_repo.close()
