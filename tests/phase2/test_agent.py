@@ -12,7 +12,15 @@ class FakeContainer:
     def wait(self) -> dict:
         return {"StatusCode": self._exit_code}
 
-    def logs(self, stdout: bool = True, stderr: bool = False) -> bytes:
+    def logs(
+        self,
+        stream: bool = False,
+        follow: bool = False,
+        stdout: bool = True,
+        stderr: bool = False,
+    ):
+        if stream:
+            return iter([self._stdout.encode()]) if self._stdout else iter([])
         if stdout and not stderr:
             return self._stdout.encode()
         if stderr and not stdout:
@@ -75,3 +83,25 @@ async def test_kill_marks_container_killed() -> None:
     executor = _executor(container)
     await executor.kill(container)
     assert container.killed
+
+
+async def test_stream_logs_yields_chunks() -> None:
+    container = FakeContainer(stdout="hello world")
+    executor = _executor(container)
+
+    chunks = []
+    async for stream, chunk in executor.stream_logs(container):
+        chunks.append((stream, chunk))
+
+    assert chunks == [("stdout", "hello world")]
+
+
+async def test_stream_logs_empty_when_no_output() -> None:
+    container = FakeContainer(stdout="")
+    executor = _executor(container)
+
+    chunks = []
+    async for stream, chunk in executor.stream_logs(container):
+        chunks.append((stream, chunk))
+
+    assert chunks == []

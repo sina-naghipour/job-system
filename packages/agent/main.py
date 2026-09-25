@@ -2,13 +2,12 @@ import asyncio
 import json
 import logging
 import os
-from typing import Optional
+from typing import AsyncGenerator, Optional
 
 import docker
 import websockets
 from websockets.asyncio.client import ClientConnection
 
-from packages.agent.error_handling_decorators import capture_job_errors
 from packages.shared.logging_config import configure_logging
 from packages.shared.protocol import JobMessage, ServerToAgent
 
@@ -41,6 +40,25 @@ class DockerExecutor:
             stdout=True,
             stderr=True,
         )
+
+    async def stream_logs(self, container) -> AsyncGenerator[tuple[str, str], None]:
+        stream = container.logs(stream=True, follow=True, stdout=True, stderr=True)
+        try:
+            while True:
+                chunk = await asyncio.to_thread(next, stream, None)
+                if chunk is None:
+                    break
+                if isinstance(chunk, bytes):
+                    text = chunk.decode("utf-8", errors="replace")
+                else:
+                    text = str(chunk)
+                if text:
+                    yield "stdout", text
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                log.exception("Failed to close log stream")
 
     async def wait(self, container) -> tuple[int, str, str]:
         return await asyncio.to_thread(self._wait_blocking, container)
@@ -78,6 +96,7 @@ class Agent:
         self._server_url = server_url
         self._executor = executor
         self._running: dict[str, object] = {}
+        self._sequences: dict[str, int] = {}
 
     async def run(self) -> None:
         async with websockets.connect(self._server_url) as ws:
@@ -113,24 +132,52 @@ class Agent:
         log.info("Received job %s: image=%s", job_id, message["image"])
 
         await ws.send(json.dumps({"type": "ack", "job_id": job_id}))
+
+        try:
+            container = await self._executor.start(
+                message["image"], message["command"]
+            )
+        except Exception as exc:
+            log.exception("Failed to start container for %s", job_id)
+            await self._send_result(ws, job_id, 1, "", str(exc), error=str(exc))
+            return
+
+        self._running[job_id] = container
+        self._sequences[job_id] = 0
+
         await ws.send(json.dumps({"type": "started", "job_id": job_id}))
 
-        exit_code, stdout, stderr = await self._execute(
-            job_id, message["image"], message["command"]
-        )
+        streaming = asyncio.create_task(self._stream(ws, job_id, container))
+        try:
+            exit_code, stdout, stderr = await self._executor.wait(container)
+        finally:
+            self._running.pop(job_id, None)
+            streaming.cancel()
+            try:
+                await streaming
+            except (asyncio.CancelledError, Exception):
+                pass
 
         await self._send_result(ws, job_id, exit_code, stdout, stderr)
 
-    @capture_job_errors
-    async def _execute(
-        self, job_id: str, image: str, command: list[str]
-    ) -> tuple[int, str, str]:
-        container = await self._executor.start(image, command)
-        self._running[job_id] = container
+    async def _stream(self, ws: ClientConnection, job_id: str, container) -> None:
         try:
-            return await self._executor.wait(container)
+            async for stream, chunk in self._executor.stream_logs(container):
+                seq = self._sequences.get(job_id, 0) + 1
+                self._sequences[job_id] = seq
+                await ws.send(json.dumps({
+                    "type": "log",
+                    "job_id": job_id,
+                    "stream": stream,
+                    "sequence": seq,
+                    "chunk": chunk,
+                }))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Log streaming failed for %s", job_id)
         finally:
-            self._running.pop(job_id, None)
+            self._sequences.pop(job_id, None)
 
     async def _on_cancel(self, ws: ClientConnection, message: dict) -> None:
         job_id = message["job_id"]
