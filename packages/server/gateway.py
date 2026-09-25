@@ -257,14 +257,15 @@ class AgentGateway:
                     "command": job.command,
                     "timeout_ms": job.timeout_ms,
                 }
-                if not await self._send(conn.ws, message):
-                    return
-                self._job_service.mark_dispatched_with_attempt(job.job_id)
-                self._event_repository.append(
-                    job.job_id, "dispatched",
-                    {"attempt": job.dispatch_attempts},
-                )
-                log.info("Job dispatched", extra=self._log_extra(job.job_id))
+            if not await self._send(conn.ws, message):
+                return
+            updated = self._job_service.mark_dispatched_with_attempt(job.job_id)
+            attempt = updated.dispatch_attempts if updated else job.dispatch_attempts
+            self._event_repository.append(
+                job.job_id, "dispatched",
+                {"attempt": attempt},
+            )
+            log.info("Job dispatched", extra=self._log_extra(job.job_id))
 
     @with_send_guard
     async def _send(self, ws: ServerConnection, message: dict) -> None:
