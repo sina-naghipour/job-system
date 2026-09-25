@@ -7,6 +7,7 @@ import uvicorn
 from packages.server.api import build_app
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker
+from packages.server.log_repository import SQLiteLogRepository
 from packages.server.sqlite_repository import SQLiteJobRepository
 from packages.server.store import AgentRegistry, JobService
 from packages.server.timeouts import TimeoutWatcher
@@ -15,10 +16,9 @@ from packages.shared.logging_config import configure_logging
 log = logging.getLogger(__name__)
 
 
-def build_components(
-    host: str, ws_port: int, db_path: str
-) -> tuple[JobService, AgentGateway, LogBroker, SQLiteJobRepository, TimeoutWatcher]:
+def build_components(host: str, ws_port: int, db_path: str):
     repository = SQLiteJobRepository(db_path)
+    log_repository = SQLiteLogRepository(db_path)
     job_service = JobService(repository)
     registry = AgentRegistry()
     log_broker = LogBroker()
@@ -27,11 +27,12 @@ def build_components(
         job_service=job_service,
         agent_registry=registry,
         log_broker=log_broker,
+        log_repository=log_repository,
         host=host,
         port=ws_port,
     )
     watcher = TimeoutWatcher(job_service=job_service, gateway=gateway)
-    return job_service, gateway, log_broker, repository, watcher
+    return job_service, gateway, log_broker, repository, log_repository, watcher
 
 
 async def run_api(app, host: str, port: int) -> None:
@@ -48,10 +49,10 @@ async def main() -> None:
     api_port = int(os.getenv("API_PORT", "8000"))
     db_path = os.getenv("DB_PATH", "data/jobs.db")
 
-    job_service, gateway, log_broker, repository, watcher = build_components(
-        host, ws_port, db_path
+    job_service, gateway, log_broker, repository, log_repository, watcher = (
+        build_components(host, ws_port, db_path)
     )
-    app = build_app(job_service, gateway, log_broker)
+    app = build_app(job_service, gateway, log_broker, log_repository)
 
     log.info(
         "Server starting: ws=ws://%s:%s api=http://%s:%s db=%s",
@@ -69,6 +70,7 @@ async def main() -> None:
         raise
     finally:
         repository.close()
+        log_repository.close()
 
 
 if __name__ == "__main__":
