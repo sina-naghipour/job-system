@@ -31,3 +31,6 @@ htmlcov/
 # SQLite
 
 data/
+
+agent.log
+server.log

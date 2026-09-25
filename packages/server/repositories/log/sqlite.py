@@ -3,16 +3,19 @@ from pathlib import Path
 from typing import Optional
 
 from packages.server.domain import now
+from packages.server.repositories.log.base import LogRepository
 
-SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+SCHEMA_PATH = Path(__file__).parent.parent / "schema.sql"
 
 
-class SQLiteLogRepository:
+class SQLiteLogRepository(LogRepository):
     def __init__(self, db_path: str = "data/jobs.db") -> None:
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        self._conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
+        self._conn = sqlite3.connect(
+            db_path, isolation_level=None, check_same_thread=False
+        )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA foreign_keys = ON")

@@ -11,15 +11,18 @@ from packages.server.error_handling_decorators import (
     with_dispatch_guard,
     with_send_guard,
 )
-from packages.server.event_repository import SQLiteEventRepository
 from packages.server.log_broker import LogBroker
-from packages.server.log_repository import SQLiteLogRepository
 from packages.server.store import AgentRegistry, JobService
 from packages.shared.protocol import (
     AgentToServer,
     CancelMessage,
     JobMessage,
     JobState,
+)
+
+from packages.server.repositories import (
+    SQLiteEventRepository,
+    SQLiteLogRepository,
 )
 
 log = logging.getLogger(__name__)
@@ -257,15 +260,15 @@ class AgentGateway:
                     "command": job.command,
                     "timeout_ms": job.timeout_ms,
                 }
-            if not await self._send(conn.ws, message):
-                return
-            updated = self._job_service.mark_dispatched_with_attempt(job.job_id)
-            attempt = updated.dispatch_attempts if updated else job.dispatch_attempts
-            self._event_repository.append(
-                job.job_id, "dispatched",
-                {"attempt": attempt},
-            )
-            log.info("Job dispatched", extra=self._log_extra(job.job_id))
+                if not await self._send(conn.ws, message):
+                    return
+                updated = self._job_service.mark_dispatched_with_attempt(job.job_id)
+                attempt = updated.dispatch_attempts if updated else job.dispatch_attempts
+                self._event_repository.append(
+                    job.job_id, "dispatched",
+                    {"attempt": attempt},
+                )
+                log.info("Job dispatched", extra=self._log_extra(job.job_id))
 
     @with_send_guard
     async def _send(self, ws: ServerConnection, message: dict) -> None:

@@ -2,16 +2,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from packages.server.api import build_app
-from packages.server.event_repository import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker
-from packages.server.log_repository import SQLiteLogRepository
-from packages.server.store import (
-    AgentRegistry,
-    InMemoryJobRepository,
-    JobService,
-)
+from packages.server.repositories import InMemoryJobRepository
+from packages.server.store import AgentRegistry, JobService
 
+from packages.server.repositories import SQLiteLogRepository, SQLiteEventRepository
 
 class RecordingGateway(AgentGateway):
     def __init__(self, *args, **kwargs) -> None:

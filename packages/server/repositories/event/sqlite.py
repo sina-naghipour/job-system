@@ -4,11 +4,12 @@ from pathlib import Path
 from typing import Optional
 
 from packages.server.domain import now
+from packages.server.repositories.event.base import EventRepository
 
-SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+SCHEMA_PATH = Path(__file__).parent.parent / "schema.sql"
 
 
-class SQLiteEventRepository:
+class SQLiteEventRepository(EventRepository):
     def __init__(self, db_path: str = "data/jobs.db") -> None:
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,6 @@
 import pytest
 
-from packages.server.event_repository import SQLiteEventRepository
+from packages.server.repositories import SQLiteEventRepository
 
 
 @pytest.fixture

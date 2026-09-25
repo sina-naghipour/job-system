@@ -4,15 +4,12 @@ import pytest
 import websockets
 
 from packages.agent.main import Agent
-from packages.server.event_repository import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker
-from packages.server.log_repository import SQLiteLogRepository
-from packages.server.store import (
-    AgentRegistry,
-    InMemoryJobRepository,
-    JobService,
-)
+from packages.server.repositories import InMemoryJobRepository
+from packages.server.store import AgentRegistry, JobService
+
+from packages.server.repositories import SQLiteLogRepository, SQLiteEventRepository
 
 
 class StubContainer:

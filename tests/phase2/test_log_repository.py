@@ -1,6 +1,6 @@
 import pytest
 
-from packages.server.log_repository import SQLiteLogRepository
+from packages.server.repositories import SQLiteLogRepository
 
 
 @pytest.fixture

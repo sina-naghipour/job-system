@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from packages.server.event_repository import SQLiteEventRepository
+from packages.server.repositories import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
 from packages.server.store import JobService
 from packages.shared.protocol import JobState

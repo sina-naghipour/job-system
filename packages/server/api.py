@@ -7,11 +7,14 @@ from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from packages.server.event_repository import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker, LogChunk
-from packages.server.log_repository import SQLiteLogRepository
 from packages.server.store import JobService
+
+from packages.server.repositories import (
+    SQLiteEventRepository,
+    SQLiteLogRepository,
+)
 
 log = logging.getLogger(__name__)
 

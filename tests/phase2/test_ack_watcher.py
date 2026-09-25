@@ -3,9 +3,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from packages.server.ack_watcher import AckWatcher
-from packages.server.event_repository import SQLiteEventRepository
-from packages.server.store import InMemoryJobRepository, JobService
+from packages.server.repositories import InMemoryJobRepository
+from packages.server.store import AgentRegistry, JobService
 from packages.shared.protocol import JobState
+
+from packages.server.repositories import SQLiteEventRepository
 
 
 class FakeGateway:

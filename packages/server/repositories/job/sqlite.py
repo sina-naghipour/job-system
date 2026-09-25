@@ -4,11 +4,10 @@ from pathlib import Path
 from typing import Optional
 
 from packages.server.domain import Job, now
-from packages.server.store import JobRepository
-
+from packages.server.repositories.job.base import JobRepository
 from packages.shared.protocol import JobState
 
-SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+SCHEMA_PATH = Path(__file__).parent.parent / "schema.sql"
 
 
 class SQLiteJobRepository(JobRepository):
