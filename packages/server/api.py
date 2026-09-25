@@ -4,11 +4,12 @@ import logging
 from typing import AsyncGenerator, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker, LogChunk
+from packages.server.log_repository import SQLiteLogRepository
 from packages.server.store import JobService
 
 log = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ def build_router(
     job_service: JobService,
     gateway: AgentGateway,
     log_broker: LogBroker,
+    log_repository: SQLiteLogRepository,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -116,6 +118,19 @@ def build_router(
         state = updated.state.value if updated else job.state.value
         return CancelJobResponse(jobId=job_id, state=state)
 
+    @router.get("/jobs/{job_id}/logs")
+    async def get_logs(
+        job_id: str,
+        stream: Optional[str] = None,
+    ) -> Response:
+        job = job_service.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        entries = log_repository.list_for_job(job_id, stream=stream)
+        body = "".join(e["chunk"] for e in entries)
+        return Response(content=body, media_type="text/plain")
+
     @router.get("/jobs/{job_id}/logs/live")
     async def stream_logs(job_id: str) -> StreamingResponse:
         job = job_service.get(job_id)
@@ -174,7 +189,8 @@ def build_app(
     job_service: JobService,
     gateway: AgentGateway,
     log_broker: LogBroker,
+    log_repository: SQLiteLogRepository,
 ) -> FastAPI:
     app = FastAPI(title="Job System API", version="0.1.0")
-    app.include_router(build_router(job_service, gateway, log_broker))
+    app.include_router(build_router(job_service, gateway, log_broker, log_repository))
     return app
