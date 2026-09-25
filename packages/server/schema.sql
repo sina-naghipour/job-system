@@ -27,3 +27,15 @@ CREATE INDEX IF NOT EXISTS idx_jobs_state
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency
     ON jobs (idempotency_key)
     WHERE idempotency_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS job_logs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id     TEXT NOT NULL,
+    stream     TEXT NOT NULL,
+    sequence   INTEGER NOT NULL,
+    chunk      TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_logs_job
+    ON job_logs (job_id, sequence);
