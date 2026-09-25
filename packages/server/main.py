@@ -4,6 +4,7 @@ import os
 
 import uvicorn
 
+from packages.server.ack_watcher import AckWatcher
 from packages.server.api import build_app
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker
@@ -16,7 +17,13 @@ from packages.shared.logging_config import configure_logging
 log = logging.getLogger(__name__)
 
 
-def build_components(host: str, ws_port: int, db_path: str):
+def build_components(
+    host: str,
+    ws_port: int,
+    db_path: str,
+    ack_timeout: float,
+    max_attempts: int,
+):
     repository = SQLiteJobRepository(db_path)
     log_repository = SQLiteLogRepository(db_path)
     job_service = JobService(repository)
@@ -31,8 +38,22 @@ def build_components(host: str, ws_port: int, db_path: str):
         host=host,
         port=ws_port,
     )
-    watcher = TimeoutWatcher(job_service=job_service, gateway=gateway)
-    return job_service, gateway, log_broker, repository, log_repository, watcher
+    timeout_watcher = TimeoutWatcher(job_service=job_service, gateway=gateway)
+    ack_watcher = AckWatcher(
+        job_service=job_service,
+        gateway=gateway,
+        ack_timeout_seconds=ack_timeout,
+        max_dispatch_attempts=max_attempts,
+    )
+    return (
+        job_service,
+        gateway,
+        log_broker,
+        repository,
+        log_repository,
+        timeout_watcher,
+        ack_watcher,
+    )
 
 
 async def run_api(app, host: str, port: int) -> None:
@@ -48,10 +69,19 @@ async def main() -> None:
     ws_port = int(os.getenv("SERVER_PORT", "8080"))
     api_port = int(os.getenv("API_PORT", "8000"))
     db_path = os.getenv("DB_PATH", "data/jobs.db")
+    ack_timeout = float(os.getenv("ACK_TIMEOUT_SECONDS", "5"))
+    max_attempts = int(os.getenv("MAX_DISPATCH_ATTEMPTS", "3"))
 
-    job_service, gateway, log_broker, repository, log_repository, watcher = (
-        build_components(host, ws_port, db_path)
-    )
+    (
+        job_service,
+        gateway,
+        log_broker,
+        repository,
+        log_repository,
+        timeout_watcher,
+        ack_watcher,
+    ) = build_components(host, ws_port, db_path, ack_timeout, max_attempts)
+
     app = build_app(job_service, gateway, log_broker, log_repository)
 
     log.info(
@@ -63,7 +93,8 @@ async def main() -> None:
         await asyncio.gather(
             gateway.serve(),
             run_api(app, host, api_port),
-            watcher.run(),
+            timeout_watcher.run(),
+            ack_watcher.run(),
         )
     except asyncio.CancelledError:
         log.info("Server shutting down")

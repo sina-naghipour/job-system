@@ -12,6 +12,7 @@ from packages.server.error_handling_decorators import (
     with_send_guard,
 )
 from packages.server.log_broker import LogBroker
+from packages.server.log_repository import SQLiteLogRepository
 from packages.server.store import AgentRegistry, JobService
 from packages.shared.protocol import (
     AgentToServer,
@@ -19,7 +20,6 @@ from packages.shared.protocol import (
     JobMessage,
     JobState,
 )
-from packages.server.log_repository import SQLiteLogRepository
 
 log = logging.getLogger(__name__)
 
@@ -211,7 +211,7 @@ class AgentGateway:
                 }
                 if not await self._send(conn.ws, message):
                     return
-                self._job_service.mark_dispatched(job.job_id)
+                self._job_service.mark_dispatched_with_attempt(job.job_id)
                 log.info("Dispatched %s to %s", job.job_id, agent_id)
 
     @with_send_guard
