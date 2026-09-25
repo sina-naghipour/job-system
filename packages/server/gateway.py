@@ -104,6 +104,7 @@ class AgentGateway:
             "log": self._on_log,
             "result": self._on_result,
             "heartbeat": self._on_heartbeat,
+            "reconcile": self._on_reconcile,
         }
         handler = handlers.get(message_type)
         if handler is None:
@@ -181,6 +182,15 @@ class AgentGateway:
     ) -> Optional[str]:
         if agent_id is not None:
             self._agents.touch(agent_id)
+        return agent_id
+
+    async def _on_reconcile(
+        self, ws: ServerConnection, message: dict, agent_id: Optional[str]
+    ) -> Optional[str]:
+        log.info(
+            "Reconcile: agent %s reports job %s is %s",
+            agent_id, message["job_id"], message.get("status"),
+        )
         return agent_id
 
     async def send_cancel(self, agent_id: str, job_id: str, reason: str) -> bool:

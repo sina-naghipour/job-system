@@ -35,16 +35,22 @@ class DockerExecutor:
                 f"Underlying error: {exc}"
             )
 
-    async def start(self, image: str, command: list[str]):
-        return await asyncio.to_thread(self._start_blocking, image, command)
+    async def start(self, job_id: str, image: str, command: list[str]):
+        return await asyncio.to_thread(
+            self._start_blocking, job_id, image, command
+        )
 
-    def _start_blocking(self, image: str, command: list[str]):
+    def _start_blocking(self, job_id: str, image: str, command: list[str]):
         return self._client.containers.run(
             image=image,
             command=command,
             detach=True,
             stdout=True,
             stderr=True,
+            labels={
+                "job_id": job_id,
+                "managed_by": "job-system",
+            },
         )
 
     async def stream_logs(self, container) -> AsyncGenerator[tuple[str, str], None]:
@@ -90,6 +96,34 @@ class DockerExecutor:
         except Exception:
             log.exception("Failed to kill container")
 
+    async def list_managed_containers(self) -> list:
+        return await asyncio.to_thread(self._list_managed_blocking)
+
+    def _list_managed_blocking(self) -> list:
+        return self._client.containers.list(
+            all=True,
+            filters={"label": "managed_by=job-system"},
+        )
+
+    async def inspect_exited(self, container) -> tuple[int, str, str]:
+        return await asyncio.to_thread(self._inspect_exited_blocking, container)
+
+    def _inspect_exited_blocking(self, container) -> tuple[int, str, str]:
+        container.reload()
+        exit_code = int(container.attrs["State"].get("ExitCode", 1))
+        stdout = container.logs(stdout=True, stderr=False).decode()
+        stderr = container.logs(stdout=False, stderr=True).decode()
+        return exit_code, stdout, stderr
+
+    async def remove(self, container) -> None:
+        await asyncio.to_thread(self._remove_blocking, container)
+
+    def _remove_blocking(self, container) -> None:
+        try:
+            container.remove(force=True)
+        except Exception:
+            log.exception("Failed to remove container")
+
 
 class Agent:
     def __init__(
@@ -124,6 +158,7 @@ class Agent:
 
     async def _session(self, ws: ClientConnection) -> None:
         await self._register(ws)
+        await self._reconcile(ws)
 
         heartbeat_task = asyncio.create_task(self._heartbeat(ws))
         try:
@@ -151,6 +186,57 @@ class Agent:
             raise
         except Exception:
             log.exception("Heartbeat failed")
+
+    async def _reconcile(self, ws: ClientConnection) -> None:
+        try:
+            containers = await self._executor.list_managed_containers()
+        except Exception:
+            log.exception("Reconcile: failed to list containers")
+            return
+
+        if containers:
+            log.info("Reconcile: found %d managed container(s)", len(containers))
+
+        for container in containers:
+            job_id = container.labels.get("job_id")
+            if not job_id:
+                log.warning("Reconcile: container without job_id label; removing")
+                await self._executor.remove(container)
+                continue
+
+            status = container.status
+            if status == "running":
+                log.info("Reconcile: job %s still running; reattaching", job_id)
+                await ws.send(json.dumps({
+                    "type": "reconcile",
+                    "job_id": job_id,
+                    "status": "running",
+                    "exit_code": None,
+                }))
+                self._running[job_id] = container
+                self._sequences[job_id] = 0
+                asyncio.create_task(self._reattach(ws, job_id, container))
+
+            elif status in ("exited", "dead"):
+                log.info("Reconcile: job %s already exited; reporting", job_id)
+                exit_code, stdout, stderr = await self._executor.inspect_exited(container)
+                await self._send_result(ws, job_id, exit_code, stdout, stderr)
+                await self._executor.remove(container)
+
+            else:
+                log.warning(
+                    "Reconcile: job %s in unexpected state %s; leaving alone",
+                    job_id, status,
+                )
+
+    async def _reattach(self, ws: ClientConnection, job_id: str, container) -> None:
+        try:
+            exit_code, stdout, stderr = await self._executor.wait(container)
+            await self._send_result(ws, job_id, exit_code, stdout, stderr)
+        except Exception:
+            log.exception("Reattach failed for %s", job_id)
+        finally:
+            self._running.pop(job_id, None)
 
     async def _listen(self, ws: ClientConnection) -> None:
         async for raw in ws:
@@ -180,7 +266,7 @@ class Agent:
 
         try:
             container = await self._executor.start(
-                message["image"], message["command"]
+                job_id, message["image"], message["command"]
             )
         except Exception as exc:
             log.exception("Failed to start container for %s", job_id)

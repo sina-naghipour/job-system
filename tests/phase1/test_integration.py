@@ -15,8 +15,10 @@ from packages.server.store import (
 
 
 class StubContainer:
-    def __init__(self) -> None:
+    def __init__(self, job_id: str = "job_stub") -> None:
         self.killed = False
+        self.labels = {"job_id": job_id, "managed_by": "job-system"}
+        self.status = "running"
 
     def kill(self) -> None:
         self.killed = True
@@ -38,12 +40,17 @@ class StubContainer:
             return iter([b"stub output"]) if stdout else iter([])
         return b"stub output" if stdout else b""
 
+    def reload(self) -> None:
+        pass
+
+    attrs = {"State": {"ExitCode": 0}}
+
 
 class StubExecutor:
     def __init__(self) -> None:
         self._container = StubContainer()
 
-    async def start(self, image: str, command: list[str]) -> StubContainer:
+    async def start(self, job_id: str, image: str, command: list[str]) -> StubContainer:
         return self._container
 
     async def stream_logs(self, container):
@@ -54,6 +61,15 @@ class StubExecutor:
 
     async def kill(self, container) -> None:
         container.kill()
+
+    async def list_managed_containers(self) -> list:
+        return []
+
+    async def inspect_exited(self, container) -> tuple[int, str, str]:
+        return 0, "stub output", ""
+
+    async def remove(self, container) -> None:
+        pass
 
 
 @pytest.mark.integration

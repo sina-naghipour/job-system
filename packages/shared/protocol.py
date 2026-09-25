@@ -63,6 +63,13 @@ class HeartbeatMessage(TypedDict):
     agent_id: str
 
 
+class ReconcileMessage(TypedDict):
+    type: Literal["reconcile"]
+    job_id: str
+    status: Literal["running"]
+    exit_code: int | None
+
+
 AgentToServer = (
     RegisterMessage
     | AckMessage
@@ -70,6 +77,7 @@ AgentToServer = (
     | LogMessage
     | ResultMessage
     | HeartbeatMessage
+    | ReconcileMessage
 )
 
 
