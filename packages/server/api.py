@@ -7,6 +7,7 @@ from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from packages.server.event_repository import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
 from packages.server.log_broker import LogBroker, LogChunk
 from packages.server.log_repository import SQLiteLogRepository
@@ -57,6 +58,7 @@ def build_router(
     gateway: AgentGateway,
     log_broker: LogBroker,
     log_repository: SQLiteLogRepository,
+    event_repository: SQLiteEventRepository,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -70,10 +72,19 @@ def build_router(
             idempotency_key=req.idempotencyKey,
             metadata=req.metadata,
         )
+        event_repository.append(job.job_id, "submitted", {
+            "agent_id": job.agent_id,
+            "image": job.image,
+        })
+        log.info("Job submitted", extra={
+            "job_id": job.job_id,
+            "correlation_id": job.correlation_id,
+            "agent_id": job.agent_id,
+        })
         try:
             await gateway.dispatch_pending(req.agentId)
         except Exception:
-            log.exception("Dispatch after submit failed for %s", job.job_id)
+            log.exception("Dispatch after submit failed", extra={"job_id": job.job_id})
         return SubmitJobResponse(jobId=job.job_id)
 
     @router.get("/jobs", response_model=JobListResponse)
@@ -115,6 +126,7 @@ def build_router(
 
         await gateway.send_cancel(job.agent_id, job_id, reason="user")
         updated = job_service.mark_cancelled(job_id)
+        event_repository.append(job_id, "cancelled", {"by": "user"})
         state = updated.state.value if updated else job.state.value
         return CancelJobResponse(jobId=job_id, state=state)
 
@@ -146,6 +158,13 @@ def build_router(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @router.get("/jobs/{job_id}/events")
+    async def get_events(job_id: str) -> dict:
+        job = job_service.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {"events": event_repository.list_for_job(job_id)}
 
     return router
 
@@ -190,7 +209,12 @@ def build_app(
     gateway: AgentGateway,
     log_broker: LogBroker,
     log_repository: SQLiteLogRepository,
+    event_repository: SQLiteEventRepository,
 ) -> FastAPI:
     app = FastAPI(title="Job System API", version="0.1.0")
-    app.include_router(build_router(job_service, gateway, log_broker, log_repository))
+    app.include_router(
+        build_router(
+            job_service, gateway, log_broker, log_repository, event_repository
+        )
+    )
     return app

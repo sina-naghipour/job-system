@@ -6,6 +6,7 @@ import uvicorn
 
 from packages.server.ack_watcher import AckWatcher
 from packages.server.api import build_app
+from packages.server.event_repository import SQLiteEventRepository
 from packages.server.gateway import AgentGateway
 from packages.server.heartbeat_watcher import HeartbeatWatcher
 from packages.server.log_broker import LogBroker
@@ -27,6 +28,7 @@ def build_components(
 ):
     repository = SQLiteJobRepository(db_path)
     log_repository = SQLiteLogRepository(db_path)
+    event_repository = SQLiteEventRepository(db_path)
     job_service = JobService(repository)
     registry = AgentRegistry()
     log_broker = LogBroker()
@@ -36,14 +38,20 @@ def build_components(
         agent_registry=registry,
         log_broker=log_broker,
         log_repository=log_repository,
+        event_repository=event_repository,
         host=host,
         port=ws_port,
     )
 
-    timeout_watcher = TimeoutWatcher(job_service=job_service, gateway=gateway)
+    timeout_watcher = TimeoutWatcher(
+        job_service=job_service,
+        gateway=gateway,
+        event_repository=event_repository,
+    )
     ack_watcher = AckWatcher(
         job_service=job_service,
         gateway=gateway,
+        event_repository=event_repository,
         ack_timeout_seconds=ack_timeout,
         max_dispatch_attempts=max_attempts,
     )
@@ -55,6 +63,7 @@ def build_components(
         log_broker,
         repository,
         log_repository,
+        event_repository,
         timeout_watcher,
         ack_watcher,
         heartbeat_watcher,
@@ -83,16 +92,19 @@ async def main() -> None:
         log_broker,
         repository,
         log_repository,
+        event_repository,
         timeout_watcher,
         ack_watcher,
         heartbeat_watcher,
     ) = build_components(host, ws_port, db_path, ack_timeout, max_attempts)
 
-    app = build_app(job_service, gateway, log_broker, log_repository)
+    app = build_app(
+        job_service, gateway, log_broker, log_repository, event_repository
+    )
 
     log.info(
-        "Server starting: ws=ws://%s:%s api=http://%s:%s db=%s",
-        host, ws_port, host, api_port, db_path,
+        "Server starting",
+        extra={"ws_port": ws_port, "api_port": api_port, "db_path": db_path},
     )
 
     try:
@@ -109,6 +121,7 @@ async def main() -> None:
     finally:
         repository.close()
         log_repository.close()
+        event_repository.close()
 
 
 if __name__ == "__main__":

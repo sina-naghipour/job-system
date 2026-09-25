@@ -11,6 +11,7 @@ from packages.server.error_handling_decorators import (
     with_dispatch_guard,
     with_send_guard,
 )
+from packages.server.event_repository import SQLiteEventRepository
 from packages.server.log_broker import LogBroker
 from packages.server.log_repository import SQLiteLogRepository
 from packages.server.store import AgentRegistry, JobService
@@ -31,6 +32,7 @@ class AgentGateway:
         agent_registry: AgentRegistry,
         log_broker: LogBroker,
         log_repository: SQLiteLogRepository,
+        event_repository: SQLiteEventRepository,
         host: str = "0.0.0.0",
         port: int = 8080,
     ) -> None:
@@ -38,6 +40,7 @@ class AgentGateway:
         self._agents = agent_registry
         self._log_broker = log_broker
         self._log_repository = log_repository
+        self._event_repository = event_repository
         self._host = host
         self._port = port
         self._dispatch_locks: dict[str, asyncio.Lock] = {}
@@ -137,7 +140,9 @@ class AgentGateway:
     async def _on_ack(
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
-        log.debug("Ack received", extra=self._log_extra(message["job_id"]))
+        job_id = message["job_id"]
+        self._event_repository.append(job_id, "ack")
+        log.debug("Ack received", extra=self._log_extra(job_id))
         return agent_id
 
     async def _on_started(
@@ -146,6 +151,9 @@ class AgentGateway:
         job_id = message["job_id"]
         job = self._job_service.mark_running(job_id)
         if job:
+            self._event_repository.append(
+                job_id, "started", {"state": job.state.value}
+            )
             log.info("Job is RUNNING", extra=self._log_extra(job_id))
         return agent_id
 
@@ -182,6 +190,11 @@ class AgentGateway:
             job = self._job_service.mark_failed(job_id, exit_code, stdout, stderr)
 
         if job:
+            self._event_repository.append(
+                job_id,
+                "result",
+                {"state": job.state.value, "exit_code": job.exit_code},
+            )
             log.info(
                 "Job finished",
                 extra={
@@ -202,10 +215,14 @@ class AgentGateway:
     async def _on_reconcile(
         self, ws: ServerConnection, message: dict, agent_id: Optional[str]
     ) -> Optional[str]:
+        job_id = message["job_id"]
+        self._event_repository.append(
+            job_id, "reconciled", {"status": message.get("status")}
+        )
         log.info(
             "Reconcile received",
             extra={
-                **self._log_extra(message["job_id"]),
+                **self._log_extra(job_id),
                 "status": message.get("status"),
             },
         )
@@ -243,6 +260,10 @@ class AgentGateway:
                 if not await self._send(conn.ws, message):
                     return
                 self._job_service.mark_dispatched_with_attempt(job.job_id)
+                self._event_repository.append(
+                    job.job_id, "dispatched",
+                    {"attempt": job.dispatch_attempts + 1},
+                )
                 log.info("Job dispatched", extra=self._log_extra(job.job_id))
 
     @with_send_guard
