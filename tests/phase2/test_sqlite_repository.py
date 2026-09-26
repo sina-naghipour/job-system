@@ -152,3 +152,8 @@ def test_state_survives_reopen(tmp_db: str) -> None:
         assert fetched.started_at is not None
     finally:
         r2.close()
+
+def test_priority_roundtrip(repo) -> None:
+    from packages.server.domain import Job
+    repo.add(Job("job_1", "agent-1", "alpine", ["echo"], 1000, priority=2))
+    assert repo.get("job_1").priority == 2

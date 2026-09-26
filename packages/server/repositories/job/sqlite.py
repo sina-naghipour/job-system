@@ -35,6 +35,7 @@ class SQLiteJobRepository(JobRepository):
             command=json.loads(row["command_json"]),
             timeout_ms=row["timeout_ms"],
             idempotency_key=row["idempotency_key"],
+            priority=row["priority"],
             metadata=json.loads(row["metadata_json"]),
             state=JobState(row["state"]),
             exit_code=row["exit_code"],
@@ -61,10 +62,10 @@ class SQLiteJobRepository(JobRepository):
                 """
                 INSERT INTO jobs (
                     job_id, agent_id, image, command_json, timeout_ms,
-                    idempotency_key, metadata_json, state, exit_code, error,
+                    idempotency_key, priority, metadata_json, state, exit_code, error,
                     stdout, stderr, created_at, updated_at, started_at,
                     finished_at, correlation_id, dispatch_attempts
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.job_id,
@@ -73,6 +74,7 @@ class SQLiteJobRepository(JobRepository):
                     json.dumps(job.command),
                     job.timeout_ms,
                     job.idempotency_key,
+                    job.priority,
                     json.dumps(job.metadata),
                     job.state.value,
                     job.exit_code,
@@ -133,7 +135,7 @@ class SQLiteJobRepository(JobRepository):
             """
             UPDATE jobs SET
                 agent_id = ?, image = ?, command_json = ?, timeout_ms = ?,
-                idempotency_key = ?, metadata_json = ?, state = ?,
+                idempotency_key = ?, priority = ?, metadata_json = ?, state = ?,
                 exit_code = ?, error = ?, stdout = ?, stderr = ?,
                 created_at = ?, updated_at = ?, started_at = ?,
                 finished_at = ?, correlation_id = ?, dispatch_attempts = ?
@@ -145,6 +147,7 @@ class SQLiteJobRepository(JobRepository):
                 json.dumps(job.command),
                 job.timeout_ms,
                 job.idempotency_key,
+                job.priority,
                 json.dumps(job.metadata),
                 job.state.value,
                 job.exit_code,

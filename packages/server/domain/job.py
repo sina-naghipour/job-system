@@ -26,6 +26,7 @@ class Job:
     # request (optional)
     metadata: dict = field(default_factory=dict)
     idempotency_key: Optional[str] = None
+    priority: int = 0
     # identity (generated)
     correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     # state machine
@@ -50,6 +51,7 @@ class Job:
             "command": self.command,
             "timeoutMs": self.timeout_ms,
             "idempotencyKey": self.idempotency_key,
+            "priority": self.priority,
             "metadata": self.metadata,
             "state": self.state.value,
             "exitCode": self.exit_code,

@@ -220,17 +220,6 @@ async def test_unknown_type_ignored(setup) -> None:
     _, gateway, _ = setup
     assert await gateway._dispatch(FakeWebSocket(), {"type": "bogus"}, "a1") == "a1"
 
-
-async def test_dispatch_pending_sends_all(setup) -> None:
-    service, gateway, registry = setup
-    a = service.submit("a1", "alpine", ["echo", "a"], 1000)
-    b = service.submit("a1", "alpine", ["echo", "b"], 1000)
-    ws = FakeWebSocket()
-    registry.register("a1", ws)
-    await gateway.dispatch_pending("a1")
-    assert {m["job_id"] for m in ws.sent} == {a.job_id, b.job_id}
-
-
 async def test_dispatch_pending_no_agent(setup) -> None:
     _, gateway, _ = setup
     await gateway.dispatch_pending("missing")
@@ -241,3 +230,17 @@ async def test_dispatch_pending_send_fails(setup) -> None:
     service.submit("a1", "alpine", ["echo"], 1000)
     registry.register("a1", FakeWebSocket(fail_on_send=True))
     await gateway.dispatch_pending("a1")
+
+async def test_dispatch_pending_sends_one_job(setup) -> None:
+    service, gateway, registry = setup
+    a = service.submit("a1", "alpine", ["echo", "a"], 1000)
+    b = service.submit("a1", "alpine", ["echo", "b"], 1000)
+    ws = FakeWebSocket()
+    registry.register("a1", ws)
+
+    await gateway.dispatch_pending("a1")
+
+    # Only one Job is sent. The Agent is now busy until it reports a result.
+    assert len(ws.sent) == 1
+    sent_id = ws.sent[0]["job_id"]
+    assert sent_id in {a.job_id, b.job_id}

@@ -25,6 +25,7 @@ class SubmitJobRequest(BaseModel):
     command: list[str] = Field(min_length=1)
     timeoutMs: int = Field(gt=0, default=60_000)
     idempotencyKey: Optional[str] = None
+    priority: int = Field(ge=0, le=2, default=0)
     metadata: dict = Field(default_factory=dict)
 
 
@@ -71,11 +72,13 @@ def build_router(
             command=req.command,
             timeout_ms=req.timeoutMs,
             idempotency_key=req.idempotencyKey,
+            priority=req.priority,
             metadata=req.metadata,
         )
         event_repository.append(job.job_id, "submitted", {
             "agent_id": job.agent_id,
             "image": job.image,
+            "priority": job.priority,
         })
         log.info("Job submitted", extra={
             "job_id": job.job_id,

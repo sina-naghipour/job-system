@@ -16,6 +16,7 @@ class JobService:
         command: list[str],
         timeout_ms: int,
         idempotency_key: Optional[str] = None,
+        priority: int = 0,
         metadata: Optional[dict] = None,
     ) -> Job:
         job = Job(
@@ -25,6 +26,7 @@ class JobService:
             command=command,
             timeout_ms=timeout_ms,
             idempotency_key=idempotency_key,
+            priority=priority,
             metadata=metadata or {},
         )
         return self._repository.add(job)
