@@ -12,14 +12,12 @@ A user submits a Job via HTTP. The system routes it to a specific Agent inside a
 - Roadmap
 - Phase 1 — MVP
 - Phase 2 — Reliability
-- Phase 3 — Scale
-- Phase 4 — Delivery
+- Phase 3 — Multi-Agent Routing
 - The Job Record as a Durable PCB
 - Communication Design
 - Design Decisions
 - State Machine Details
 - Failure Model
-- Scheduling Policy
 - Tech Stack
 - Quick Start
 - Evidence
@@ -33,7 +31,7 @@ A user submits a Job via HTTP. The system routes it to a specific Agent inside a
 │                          USER                               │
 │              (CLI, curl, or any HTTP client)                │
 └───────────────────────────┬─────────────────────────────────┘
-                            │ REST + WebSocket / SSE
+                            │ REST + SSE
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    CONTROL PLANE (Server)                   │
@@ -69,14 +67,13 @@ A user submits a Job via HTTP. The system routes it to a specific Agent inside a
 
 ## Roadmap
 
-The project is delivered in four phases. Each phase is a milestone, a PR, and a working demo. Each phase leaves the repository in a submittable state.
+The project is delivered in three phases. Each phase is a milestone, a PR, and a working demo. Each phase leaves the repository in a submittable state.
 
 | Phase | Focus | Status |
 |-------|-------|--------|
 | **Phase 1** | MVP — prove the core | ☑ |
 | **Phase 2** | Reliability — survive failures | ☑ |
-| **Phase 3** | Scale — multi-Agent and scheduling | ☐ |
-| **Phase 4** | Delivery — observability and docs | ☐ |
+| **Phase 3** | Multi-Agent Routing — two agents, correct routing | ☑ |
 
 ---
 
@@ -172,9 +169,9 @@ A system where every Job is durably tracked, every state transition is enforced,
 | Job event history | Append-only audit trail per Job |
 | Duplicate suppression | Same `idempotencyKey` returns the same Job, always |
 
-### Explicitly Out of Scope
+### Explicitly Out of Scope for Phase 2
 
-- Multi-Agent routing and label-based selection
+- Multi-Agent routing (delivered in Phase 3)
 - Priority scheduling, aging, MLFQ
 - Dashboards and metrics endpoints
 
@@ -200,84 +197,39 @@ A system that a reviewer can break on purpose and watch recover. 165 tests, 87.3
 
 ---
 
-## Phase 3 — Scale
+## Phase 3 — Multi-Agent Routing
 
 ### Objective
 
-Make the system intelligent. Multiple Agents, correct routing, and scheduling policies that prevent starvation and prioritize short or interactive work.
+Run more than one Agent at the same time and guarantee that every Job reaches exactly the Agent it was submitted for. This is the minimum required by the task: *"at least two independent Agents must exist in the Demo so correct Job routing can be verified."*
 
 ### What It Delivers
 
-A system that runs several Agents across simulated Datacenters, routes Jobs correctly, and applies MLFQ-inspired scheduling so that no Job starves and interactive work is not blocked by batch work.
+Two Agents connect to the same Server independently. Jobs target a specific `agentId` and are delivered only to that Agent. A Job for an Agent that has never connected remains `PENDING` until that Agent registers. A single command brings the whole system up.
 
 ### Capabilities
 
 | Capability | Description |
 |------------|-------------|
-| Multi-Agent | Multiple Agents register independently and stay isolated |
-| Explicit routing | Jobs target a specific `agentId`; never cross Agents |
-| Label-based routing | Optional: Jobs match Agents by labels (region, purpose) |
-| Per-Agent ready queue | Each Agent has its own FIFO queue of pending Jobs |
-| Priority levels | Interactive, normal, batch |
-| MLFQ feedback | Jobs demote on timeout; all Jobs boost periodically |
-| Aging | Pending Jobs gain priority over time to prevent starvation |
-| Escalating timeouts | Retries receive progressively longer timeouts |
-| Preemption | High-priority Jobs can preempt low-priority ones via cancel |
-| Fair dispatch | Round-robin across matching Agents when applicable |
+| Multi-Agent | Multiple Agents register independently and are tracked separately |
+| Explicit routing | Jobs target a specific `agentId`; never delivered to another Agent |
+| Offline / unknown Agent | Job stays `PENDING`; dispatched on the Agent's next registration |
+| Per-Agent dispatch | Each Agent has its own pending queue and its own dispatch lock |
+| Two-Agent Demo | `docker-compose.yml` runs Server + `agent-1` + `agent-2` |
+| Routing tests | Unit tests lock the routing behavior for registered, unregistered, and returning Agents |
+| Priority (bonus) | Jobs carry an optional `priority`; dispatcher picks the highest first |
 
-### Scheduling Policy
+### Routing Decisions
 
-The scheduler is inspired by Multi-Level Feedback Queue (MLFQ) from OS CPU scheduling, adapted to a distributed, container-based model.
+**Unknown Agent at submit.** A Job submitted for an `agentId` that has never connected is **accepted** and stays `PENDING`. It dispatches the moment an Agent with that id registers. The Server does not reject at submit time, because Agent registration is asynchronous and the Server cannot distinguish "unknown" from "temporarily offline."
 
-```
-Queue 0 (highest):  Interactive jobs, short timeout
-Queue 1:            Normal jobs
-Queue 2 (lowest):   Batch jobs, long timeout
-```
+**Agent identity across reconnects.** `agentId` is the identity. If `agent-1` restarts, the registry overwrites the connection and pending Jobs flow to the new connection. Consequence: two running processes that use the same `AGENT_ID` will race for the same Jobs, so the id must be unique per running Agent.
 
-Rules:
-
-- A Job starts in the highest-priority queue.
-- If it exceeds its time slice, it is preempted, demoted one level, and its timeout is doubled before requeuing.
-- Every 60 seconds, all `PENDING` Jobs are boosted back to the highest queue to prevent starvation.
-- Within a queue, dispatch is FIFO.
-- Across queues, the highest non-empty queue wins.
-
-This adapts CPU scheduling to distributed execution: preemption is expensive (killing a container), so it is rare; idempotency keys — which have no CPU equivalent — ensure retries are safe.
+**Explicitly not implemented.** MLFQ, demotion on timeout, aging, preemption, label-based routing, and metrics endpoints are out of scope and are not present in the code.
 
 ### Deliverable
 
-A system that demonstrates correct routing and a defensible scheduling policy.
-
----
-
-## Phase 4 — Delivery
-
-### Objective
-
-Make the system understandable, debuggable, and reproducible by anyone who clones the repository.
-
-### What It Delivers
-
-A professional repository that a reviewer can clone, run, and understand in minutes. Full observability, complete documentation, and a one-command demo.
-
-### Capabilities
-
-| Capability | Description |
-|------------|-------------|
-| Health endpoints | `/health` and `/ready` |
-| Metrics endpoint | `/metrics` in Prometheus format |
-| README | Architecture, roadmap, decisions, trade-offs |
-| AI_USAGE.md | Honest record of AI assistance and human decisions |
-| Documentation | Per-phase notes in `docs/` |
-| docker-compose | One command to run Server and two Agents |
-| Demo scripts | `scripts/demo.sh` and `scripts/demo.ps1` |
-| Failure scenarios | Reproducible scripts for each failure mode |
-| `env.example` | Documented environment configuration |
-
-### Deliverable
-
-A repository that a reviewer can run, break, and understand without reading the source.
+A system that runs two Agents, routes Jobs correctly between them, and proves it with tests and a demo. Tag `v0.3.1` through `v0.3.4`.
 
 ---
 
@@ -311,7 +263,7 @@ A Job Record contains:
 | `correlationId` | Traceability |
 | `dispatchAttempts` | Retry count |
 | Logs | Output / context |
-| `priority` (Phase 3) | Scheduling priority |
+| `priority` | Scheduling hint (dispatch order only) |
 
 So the Job Record is the **PCB of a Job** — the single, durable structure that holds everything the Server needs to know about a Job's identity, state, context, and lifecycle.
 
@@ -349,7 +301,7 @@ Two channels.
 |--------|-------------------------|
 | **WebSocket** | **Chosen.** Outbound-friendly, works behind NAT, bidirectional |
 | gRPC bidirectional streaming | Rejected. More setup, harder for browser clients |
-| Message Broker (RabbitMQ, NATS) | Rejected. Adds infrastructure; deferred to a later phase |
+| Message Broker (RabbitMQ, NATS) | Rejected. Adds infrastructure; deferred |
 
 The Agent opens the WebSocket. The Server never dials the Agent.
 
@@ -369,6 +321,7 @@ The dispatch channel (Agent ↔ Server) and the log channel (User ↔ Server) ar
 | **Backpressure** | Per-subscriber log queues with a cap. Container never blocked |
 | **Acknowledgement** | Every dispatch requires an `ack`; unacked Jobs requeue |
 | **Reconnect** | Agent reconnects with exponential backoff. Server marks offline after 3 missed heartbeats |
+| **Routing** | Jobs are keyed by `agentId`; dispatch and registry are per-Agent |
 | **Horizontal scaling** | Future: multiple Server instances sharing the DB |
 
 ---
@@ -390,9 +343,10 @@ The dispatch channel (Agent ↔ Server) and the log channel (User ↔ Server) ar
 | Container discovery | — | Docker labels | Standard metadata |
 | Reconciliation | — | Agent-driven | Agent owns local state |
 | Idempotency scope | Per-user, global, per-agent | Global | Strongest guarantee |
-| Job scheduling | FIFO, priority, MLFQ | MLFQ (Phase 3) | Prevents starvation, adapts to behavior |
-| Preemption | None, cancel only, kill + requeue | Cancel + requeue | Safe with idempotency |
-| Multi-Server | Single, shared DB, sharded | Single (MVP), shared DB (future) | Start simple |
+| Job routing | Broadcast, hashed, explicit | Explicit `agentId` | Deterministic; Agent owns its own queue |
+| Unknown Agent at submit | Reject, accept-and-queue, TTL | Accept-and-queue | Agent registration is asynchronous |
+| Job scheduling | FIFO, priority, MLFQ | FIFO with priority ordering | MLFQ out of scope |
+| Multi-Server | Single, shared DB, sharded | Single | Start simple |
 
 ---
 
@@ -463,35 +417,8 @@ The Server does not silently retry failed Jobs. The only automatic retry is the 
 | Timeout | Server cancels, Agent kills, state → `TIMED_OUT` |
 | Duplicate delivery | Idempotency prevents double execution |
 | Late result for a final Job | Recorded as event, state unchanged |
-
----
-
-## Scheduling Policy
-
-The scheduler adapts the **Multi-Level Feedback Queue (MLFQ)** from OS CPU scheduling to a distributed Job system.
-
-| CPU Concept | System Equivalent |
-|-------------|-------------------|
-| Ready queue | `PENDING` Jobs per Agent |
-| Dispatcher | Server orchestrator |
-| Time slice | `timeoutMs` |
-| Preemption | `cancel` message → container kill |
-| Priority | Job priority level |
-| Aging | Periodic boost of pending Jobs |
-| Starvation | Job stuck in `PENDING` |
-| Throughput | Jobs completed per unit time |
-
-**Why MLFQ:**
-
-- It solves priority, fairness, and starvation in one mechanism.
-- It adapts to Job behavior (short Jobs stay high, long Jobs demote).
-- It maps cleanly to distributed execution with expensive preemption.
-
-**Why not plain priority:**
-
-- Plain priority starves low-priority Jobs.
-- Plain FIFO ignores interactive workloads.
-- MLFQ gives both responsiveness and fairness.
+| Job for an unknown Agent | Accepted, stays `PENDING`, dispatched on registration |
+| Job for a different Agent | Never delivered to this Agent; routing is per-`agentId` |
 
 ---
 
@@ -509,12 +436,27 @@ The scheduler adapts the **Multi-Level Feedback Queue (MLFQ)** from OS CPU sched
 | Validation | Pydantic | Integrated with FastAPI |
 | Testing | pytest + pytest-asyncio | Standard |
 | Linting | ruff | Fast, all-in-one |
+| Local multi-Agent | docker-compose | One command for Server + two Agents |
 
 ---
 
 ## Quick Start
 
 Requires Python 3.11+, Docker Desktop, and PowerShell.
+
+### Option A — docker-compose (Server + two Agents)
+
+```powershell
+docker compose up
+```
+
+This starts the Server, `agent-1`, and `agent-2`. Then run the routing demo from a second terminal:
+
+```powershell
+powershell -File scripts/demo_phase3_routing.ps1
+```
+
+### Option B — manual (three terminals)
 
 ```powershell
 git clone https://github.com/<you>/job-system.git
@@ -525,18 +467,23 @@ python -m venv .venv
 pip install -e ".[dev]"
 ```
 
-Three terminals in the project root, venv activated in each.
-
 **Terminal 1 — Server:**
 
 ```powershell
 python -m packages.server.main
 ```
 
-**Terminal 2 — Agent:**
+**Terminal 2 — Agent 1:**
 
 ```powershell
 $env:AGENT_ID = "agent-1"
+python -m packages.agent.main
+```
+
+**Terminal 2b — Agent 2 (separate terminal):**
+
+```powershell
+$env:AGENT_ID = "agent-2"
 python -m packages.agent.main
 ```
 
@@ -577,3 +524,4 @@ MAX_DISPATCH_ATTEMPTS=3
 
 - [Phase 1 Evidence](docs/EVIDENCE_PHASE1.md) — MVP: end-to-end dispatch, 83 tests, 97.84% coverage, `v0.1.0`
 - [Phase 2 Evidence](docs/EVIDENCE_PHASE2.md) — Reliability: persistence, timeouts, logs, ack, heartbeat, reconcile, events, 165 tests, 87.37% coverage, `v0.2.1`–`v0.2.8`, `v0.3.0`
+- [Phase 3 Evidence](docs/EVIDENCE_PHASE3.md) — Multi-Agent routing: two Agents, correct routing, unknown-Agent policy, routing tests, `v0.3.1`–`v0.3.4`
