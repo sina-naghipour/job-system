@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     started_at          TEXT,
     finished_at         TEXT,
     correlation_id      TEXT NOT NULL,
-    dispatch_attempts   INTEGER NOT NULL DEFAULT 0
+    dispatch_attempts   INTEGER NOT NULL DEFAULT 0,
+    priority            INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_agent_state

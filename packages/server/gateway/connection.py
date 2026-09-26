@@ -6,15 +6,16 @@ from typing import Optional
 import websockets
 from websockets.asyncio.server import ServerConnection
 
-from packages.server.error_handling_decorators import (
+from packages.server.errors import (
     with_connection_guard,
     with_dispatch_guard,
     with_send_guard,
 )
-from packages.server.event_repository import SQLiteEventRepository
-from packages.server.log_broker import LogBroker
-from packages.server.log_repository import SQLiteLogRepository
-from packages.server.store import AgentRegistry, JobService
+from packages.server.repositories import (
+    SQLiteEventRepository,
+    SQLiteLogRepository,
+)
+from packages.server.services import AgentRegistry, JobService, LogBroker
 from packages.shared.protocol import (
     AgentToServer,
     CancelMessage,
@@ -203,6 +204,13 @@ class AgentGateway:
                     "exit_code": job.exit_code,
                 },
             )
+
+        if agent_id:
+            conn = self._agents.get(agent_id)
+            if conn is not None:
+                conn.mark_free()
+            await self.dispatch_pending(agent_id)
+
         return agent_id
 
     async def _on_heartbeat(
@@ -242,31 +250,34 @@ class AgentGateway:
     async def dispatch_pending(self, agent_id: str) -> None:
         async with self._lock_for(agent_id):
             conn = self._agents.get(agent_id)
-            if conn is None:
+            if conn is None or not conn.is_idle:
                 return
 
             pending = self._job_service.list(agent_id=agent_id, state=JobState.PENDING)
-            pending = sorted(pending, key=lambda j: j.created_at)
+            if not pending:
+                return
 
-            for job in pending:
-                message: JobMessage = {
-                    "type": "job",
-                    "job_id": job.job_id,
-                    "correlation_id": job.correlation_id,
-                    "image": job.image,
-                    "command": job.command,
-                    "timeout_ms": job.timeout_ms,
-                }
+            pending = sorted(pending, key=lambda j: (j.priority, j.created_at))
+            job = pending[0]
+
+            message: JobMessage = {
+                "type": "job",
+                "job_id": job.job_id,
+                "correlation_id": job.correlation_id,
+                "image": job.image,
+                "command": job.command,
+                "timeout_ms": job.timeout_ms,
+            }
             if not await self._send(conn.ws, message):
                 return
+            conn.mark_busy()
             updated = self._job_service.mark_dispatched_with_attempt(job.job_id)
             attempt = updated.dispatch_attempts if updated else job.dispatch_attempts
             self._event_repository.append(
-                job.job_id, "dispatched",
-                {"attempt": attempt},
+                job.job_id, "dispatched", {"attempt": attempt}
             )
             log.info("Job dispatched", extra=self._log_extra(job.job_id))
-
+            
     @with_send_guard
     async def _send(self, ws: ServerConnection, message: dict) -> None:
         await ws.send(json.dumps(message))

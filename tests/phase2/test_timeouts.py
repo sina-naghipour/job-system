@@ -2,13 +2,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from packages.server.event_repository import SQLiteEventRepository
-from packages.server.store import (
-    InMemoryJobRepository,
-    Job,
-    JobService,
-)
-from packages.server.timeouts import TimeoutWatcher
+from packages.server.repositories import SQLiteEventRepository
+from packages.server.repositories import InMemoryJobRepository
+from packages.server.services import JobService
+from packages.server.domain import Job
+from packages.server.watchers import TimeoutWatcher
 from packages.shared.protocol import JobState
 
 

@@ -2,8 +2,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from packages.server.heartbeat_watcher import HeartbeatWatcher
-from packages.server.store import AgentRegistry
+from packages.server.watchers import HeartbeatWatcher
+from packages.server.services import LogBroker
+from packages.server.services import JobService, AgentRegistry
 
 
 class FakeWebSocket:

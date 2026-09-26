@@ -1,0 +1,57 @@
+services:
+  server:
+    build: .
+    container_name: job-system-server
+    command: python -m packages.server.main
+    environment:
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      API_PORT: 8000
+      DB_PATH: /app/data/jobs.db
+      ACK_TIMEOUT_SECONDS: 5
+      MAX_DISPATCH_ATTEMPTS: 3
+      LOG_LEVEL: INFO
+    ports:
+      - "8000:8000"
+      - "8080:8080"
+    volumes:
+      # Named volume, not a bind mount. SQLite WAL mode does not work
+      # against a Windows bind mount (9p filesystem limitation).
+      # See docs/EVIDENCE_PHASE3.md for the trade-off.
+      - job-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/jobs')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  agent-1:
+    build: .
+    container_name: job-system-agent-1
+    command: python -m packages.agent.main
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      AGENT_ID: agent-1
+      SERVER_URL: ws://server:8080
+      LOG_LEVEL: INFO
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  agent-2:
+    build: .
+    container_name: job-system-agent-2
+    command: python -m packages.agent.main
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      AGENT_ID: agent-2
+      SERVER_URL: ws://server:8080
+      LOG_LEVEL: INFO
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  job-data:
